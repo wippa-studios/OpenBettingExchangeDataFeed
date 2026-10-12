@@ -343,3 +343,33 @@ def test_score_parsing_is_defensive():
                       "home_score": "2", "away_score": "1"}
     # A sport whose payload is not home/away is skipped, not guessed at.
     assert score_from_betfair({"homeRuns": 3}) is None
+
+# ── credential requirements per command ────────────────────────────────────
+
+def test_migrate_does_not_require_betfair_credentials(tmp_path, monkeypatch):
+    """Creating the schema must not need an API key.
+
+    Found by CI on a fresh checkout: `betfeed migrate` aborted with
+    "[config] aborting: missing BETFAIR_APP_KEY", so a clean machine could not
+    create its database before obtaining a key. Every developer already has a
+    .env, which is exactly why only CI hits it.
+    """
+    from betfeed.config import load_or_exit
+
+    # DATABASE_URL is still required — migrate genuinely needs a database to
+    # create a schema in. Only the BETFAIR credentials are waived.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:5432/db")
+    absent = tmp_path / "no-such.env"
+
+    cfg = load_or_exit(absent, require_credentials=False)
+    assert cfg.database_url
+    assert not cfg.app_key, "no key was supplied, and none was demanded"
+
+    # And without the flag, the same config must still be refused.
+    with pytest.raises(SystemExit):
+        load_or_exit(absent, require_credentials=True)
+
+    # A missing DATABASE_URL is still fatal even for migrate.
+    monkeypatch.delenv("DATABASE_URL")
+    with pytest.raises(SystemExit):
+        load_or_exit(absent, require_credentials=False)
