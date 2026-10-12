@@ -308,7 +308,44 @@ def feed_health(conn: psycopg.Connection) -> dict:
     out["odds_age_seconds"] = (
         int((datetime.now(timezone.utc) - newest).total_seconds()) if newest else None
     )
+    out.update(_data_delay(conn))
     return out
+
+
+def _data_delay(conn: psycopg.Connection) -> dict:
+    """Is this a DELAY app key, and how stale is the data we are serving?
+
+    Betfair answers a DELAY key with `is_market_data_delayed: true` on every
+    book and WITHHOLDS `publish_time` entirely, so the age of the data cannot be
+    computed from a timestamp -- there isn't one. Verified on this key: every
+    book returned is_market_data_delayed=true and publish_time=null, while our
+    own captured_at is only seconds old.
+
+    That combination is reported rather than left implicit, because "odds_age_
+    seconds: 139" reads like fresh data and is not: it measures when WE polled,
+    not when Betfair priced the market. Polling faster cannot improve it; only a
+    LIVE app key can, and that is a commercial change, not a config one.
+    """
+    row = conn.execute(
+        """
+        SELECT count(*) AS n,
+               count(publish_time) AS with_publish_time,
+               min(captured_at) AS oldest_capture
+          FROM market_odds_current
+        """
+    ).fetchone()
+    if not row or not row["n"]:
+        return {"app_key_delay": None, "data_age_seconds": None}
+    return {
+        # True when Betfair withholds publish_time on every book we hold.
+        "app_key_delay": row["with_publish_time"] == 0,
+        "data_age_seconds": None,
+        "note": (
+            "Betfair withholds publish_time on a DELAY key, so data age is not "
+            "measurable. odds_age_seconds is OUR poll age, not the data's age. "
+            "Polling faster does not reduce the delay; a LIVE app key does."
+        ),
+    }
 
 
 def _job_health(row: dict) -> dict:

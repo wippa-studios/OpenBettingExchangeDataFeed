@@ -125,6 +125,32 @@ def normalise_book(mb) -> dict:
     }
 
 
+def _json_safe(value):
+    """Replace non-finite floats with None, recursively.
+
+    Betfair reports an INFINITE size for the best-lay-at-minimum-odds offer
+    (the 1.01 lay that takes any stake). `json.dumps` writes that as the bare
+    token `Infinity`, which Python accepts but which is NOT valid RFC 8259 JSON,
+    so Postgres rejects the whole row:
+
+        InvalidTextRepresentation: invalid input syntax for type json
+        DETAIL:  Token "Infinity" is invalid.
+        CONTEXT:  JSON data, line 1: ... "price": 1.26, "size": Infinity...
+
+    That aborts the entire odds poll on any market carrying a 1.01 lay, which is
+    almost every actively-quoted market. NaN has the same problem. Neither has a
+    JSON representation, so they are stored as null -- meaning "no finite size
+    offered", which is the honest reading of an infinite-size quote.
+    """
+    if isinstance(value, float):
+        return value if value == value and value not in (float("inf"), float("-inf")) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def ladder_payload(book: dict) -> dict:
     """The JSONB stored on market_snapshot / market_odds_current.
 
@@ -133,7 +159,7 @@ def ladder_payload(book: dict) -> dict:
     separate backfill for the same reason. Names live in the selection table,
     which is what feed 1 populated, and the read side joins them back on.
     """
-    return {
+    return _json_safe({
         "status": book["status"],
         "inplay": book["inplay"],
         "bet_delay": book["bet_delay"],
@@ -154,7 +180,7 @@ def ladder_payload(book: dict) -> dict:
             }
             for s in book["selections"]
         ],
-    }
+    })
 
 
 def result_from_book(book: dict, *, observed_at: datetime | None = None) -> dict | None:

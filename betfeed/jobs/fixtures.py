@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from ..betfair import BetfairClient
 from ..config import Config
@@ -364,7 +365,16 @@ def write_result(conn, result: dict) -> bool:
                 result["winner_selection_ids"],
                 row["market_start_time"],
                 result.get("source", "book"),
-                result["runners"],
+                # market_result.runners is JSONB and psycopg3 does NOT adapt a
+                # Python dict on its own -- executemany raised
+                #   ProgrammingError: cannot adapt type 'dict' using placeholder '%s'
+                # on the first real result. Jsonb() is the documented wrapper and
+                # also encodes with json.dumps rather than repr, so a runner name
+                # containing a quote cannot corrupt the payload.
+                #
+                # winner_selection_ids needs no wrapper: psycopg3 adapts a Python
+                # list to a Postgres array, and the column is BIGINT[].
+                Jsonb(result["runners"]),
             )
         ],
     )

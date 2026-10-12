@@ -59,7 +59,7 @@ DEFAULTS: dict[str, str] = {
     # Betfair caps market data at 200 weight points per request and 100 event ids
     # per catalogue filter. These are the chunk sizes we aim for; on
     # TOO_MUCH_DATA the client bisects instead of failing.
-    "BOOK_CHUNK_SIZE": "100",
+    "BOOK_CHUNK_SIZE": "40",
     "CATALOGUE_CHUNK_EVENTS": "100",
     "CATALOGUE_MAX_RESULTS": "1000",
     # DELAY-SAFE by default. VENUE and EVENT_RUNNER_DESCRIPTION are Live-key-only

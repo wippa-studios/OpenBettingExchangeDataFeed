@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from ..betfair import BetfairClient
 from ..config import Config
@@ -84,7 +85,10 @@ def _poll(conn, client: BetfairClient, cfg: Config, stats: dict) -> None:
                 book["inplay"],
                 book["publish_time"],
                 book["total_matched"],
-                payload,
+                # JSONB: psycopg3 will not adapt a dict for a %s placeholder
+                # (ProgrammingError: cannot adapt type 'dict'), so wrap it. Same
+                # reason as market_result.runners in jobs/fixtures.py.
+                Jsonb(payload),
             )
         )
         current.append(
@@ -96,7 +100,7 @@ def _poll(conn, client: BetfairClient, cfg: Config, stats: dict) -> None:
                 book["bet_delay"],
                 book["publish_time"],
                 book["total_matched"],
-                payload,
+                Jsonb(payload),
             )
         )
         market_status_rows.append(
