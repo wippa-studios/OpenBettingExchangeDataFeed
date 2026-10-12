@@ -149,6 +149,27 @@ class BetfairClient:
                 # A cached token is verified by the first real call; there is no
                 # login endpoint for it. Treat it as logged in optimistically.
                 self._client = client
+            elif self.cfg.login_mode == "password":
+                # login_interactive(), NOT login().
+                #
+                # In betfairlightweight 2.20.x, Login.url is hard-wired to
+                # `identity_cert_uri + "certlogin"` — that class has NO password
+                # endpoint at all. So calling login() in password mode POSTs to
+                # the CERTIFICATE endpoint and Betfair answers
+                # CERT_AUTH_REQUIRED, which reads like "this account needs 2FA
+                # and certificates". That is wrong for a DELAY app key: Betfair
+                # documents the Delay key as the development/testing key that
+                # authenticates with username + password, and it is the key this
+                # project is configured with.
+                #
+                # LoginInteractive.url is `identity_uri + "login"` — the real
+                # password endpoint — and returns a session token from a Delay
+                # key. Verified against the live API.
+                client.login_interactive()
+                if not client.session_token:
+                    raise BetfairError("login returned no session token")
+                self._client = client
+                log.info("logged in to Betfair (mode=%s)", self.cfg.login_mode)
             else:
                 client.login()
                 self._client = client
@@ -264,15 +285,20 @@ class BetfairClient:
             self.client.betting.list_market_catalogue,
             filter=market_filter(**flt),
             max_results=self.cfg.catalogue_max_results,
-            market_projection=[
-                "RUNNER_DESCRIPTION",
-                "MARKET_DESCRIPTION",
-                "EVENT",
-                "EVENT_TYPE",
-                "COMPETITION",
-                "MARKET_START_TIME",
-                "VENUE",
-            ],
+            # Configurable, because two of these fields do not exist on a
+            # DELAY app key and asking for them fails the whole request:
+            #   MARKET_DESCRIPTION -> ANGX-0001
+            #   VENUE               -> DSC-0018
+            # Betfair issues two keys per registration — a Delay key (the
+            # development/testing key, and what this project is configured with)
+            # and an inactive Live key. Live-only projections are simply not
+            # available on the Delay key, and Betfair rejects the CALL rather
+            # than quietly omitting the field, so a hard-coded list took the
+            # whole collector down on a Delay key with DSC-0018.
+            #
+            # Overridable with CATALOGUE_PROJECTION if you hold a Live key and
+            # want the extra fields back.
+            market_projection=list(self.cfg.catalogue_projection),
             sort="FIRST_TO_START",
             locale=self.cfg.locale,
         )

@@ -167,9 +167,84 @@ def test_login_failure_is_explained_not_raised_raw():
     import betfeed.betfair as mod
 
     original = mod.APIClient
-    mod.APIClient = lambda **kwargs: type("C", (), {"login": staticmethod(boom)})()
+    # Password mode calls login_interactive(), not login(). The fake has to model
+    # the call the code actually makes, or this test passes against a stub that
+    # no real client ever exercises.
+    mod.APIClient = lambda **kwargs: type(
+        "C", (), {"login": staticmethod(boom), "login_interactive": staticmethod(boom)}
+    )()
     try:
         with pytest.raises(BetfairAuthError, match="2FA"):
+            client.login()
+    finally:
+        mod.APIClient = original
+
+
+def test_password_mode_uses_login_interactive_not_the_cert_endpoint():
+    """A DELAY app key must authenticate against identitysso, not certlogin.
+
+    betfairlightweight's `Login.url` is hard-wired to
+    `identity_cert_uri + "certlogin"` and has no password endpoint, so calling
+    `login()` in password mode POSTs to the certificate endpoint and Betfair
+    answers CERT_AUTH_REQUIRED. That error reads like "this account needs 2FA
+    and certificates", which is wrong for a Delay key — Betfair documents it as
+    the development/testing key that authenticates with username + password.
+    `LoginInteractive.url` is `identity_uri + "login"`, the real password
+    endpoint. This pins which one password mode uses, because picking wrong is
+    invisible until a real login.
+    """
+    cfg = make_cfg(BETFAIR_LOGIN_MODE="password")
+    client = BetfairClient(cfg, sleeper=lambda _s: None)
+
+    calls = []
+
+    class FakeClient:
+        session_token = None
+
+        def login(self):
+            calls.append("login")
+
+        def login_interactive(self):
+            calls.append("login_interactive")
+            self.session_token = "tok"
+
+    import betfeed.betfair as mod
+
+    original = mod.APIClient
+    mod.APIClient = lambda **kwargs: FakeClient()
+    try:
+        client.login()
+    finally:
+        mod.APIClient = original
+
+    assert calls == ["login_interactive"], f"password mode called {calls}, not the password endpoint"
+
+
+def test_password_mode_fails_loudly_when_no_session_token_comes_back():
+    """A login that returns no token must raise, not mark itself logged in.
+
+    `session_token` is what every subsequent Betfair call authenticates with.
+    Silently proceeding without one would surface much later as a confusing 401
+    on the first catalogue request instead of a clear login failure.
+    """
+    cfg = make_cfg(BETFAIR_LOGIN_MODE="password")
+    client = BetfairClient(cfg, sleeper=lambda _s: None)
+
+    class FakeClient:
+        session_token = None
+
+        def login(self):
+            raise AssertionError("password mode must not touch the cert endpoint")
+
+        def login_interactive(self):
+            pass  # succeeds but yields no token
+
+    import betfeed.betfair as mod
+
+    original = mod.APIClient
+    mod.APIClient = lambda **kwargs: FakeClient()
+    try:
+        with pytest.raises(BetfairAuthError):
             client.login()
     finally:
         mod.APIClient = original

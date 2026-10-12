@@ -12,6 +12,14 @@ import sys
 from pathlib import Path
 
 # Betfair event type ids we will not walk by accident.
+# MarketProjection values Betfair accepts on listMarketCatalogue. The two
+# Live-key-only ones are listed because they are valid syntax — asking for them
+# on a Delay key fails the request, not the config.
+KNOWN_MARKET_PROJECTIONS = (
+    "RUNNER_DESCRIPTION,EVENT,EVENT_TYPE,COMPETITION,MARKET_START_TIME,"
+    "MARKET_DESCRIPTION,VENUE"
+)
+
 KNOWN_EVENT_TYPES = {
     "1": "Soccer",
     "4": "Cricket",
@@ -54,6 +62,10 @@ DEFAULTS: dict[str, str] = {
     "BOOK_CHUNK_SIZE": "100",
     "CATALOGUE_CHUNK_EVENTS": "100",
     "CATALOGUE_MAX_RESULTS": "1000",
+    # DELAY-SAFE by default. VENUE and EVENT_RUNNER_DESCRIPTION are Live-key-only
+    # and fail a Delay key's request outright with DSC-0018; everything else,
+    # including MARKET_DESCRIPTION, works. Override only with a Live key.
+    "CATALOGUE_PROJECTION": "RUNNER_DESCRIPTION,MARKET_DESCRIPTION,EVENT,EVENT_TYPE,COMPETITION,MARKET_START_TIME",
     "LADDER_LEVELS": "3",
     "INCLUDE_TRADED_VOLUME": "false",
     "SNAPSHOT_RETENTION_DAYS": "30",
@@ -76,6 +88,14 @@ _INT_RANGES = {
     "BOOK_CHUNK_SIZE": (1, 200),
     "CATALOGUE_CHUNK_EVENTS": (1, 100),
     "CATALOGUE_MAX_RESULTS": (1, 1000),
+    "CATALOGUE_PROJECTION": (
+        # What a Delay key accepts, then the Live-only ones. Verified field by
+        # field against the live API: MARKET_DESCRIPTION is fine on a Delay key
+        # (and is where market_type_code comes from), while VENUE and
+        # EVENT_RUNNER_DESCRIPTION both fail the whole call with DSC-0018.
+        "RUNNER_DESCRIPTION,MARKET_DESCRIPTION,EVENT,EVENT_TYPE,COMPETITION,"
+        "MARKET_START_TIME,VENUE,EVENT_RUNNER_DESCRIPTION",
+    ),
     "LADDER_LEVELS": (1, 10),
     "SNAPSHOT_RETENTION_DAYS": (1, 3650),
     "RETENTION_CHECK_EVERY_MINUTES": (5, 10080),
@@ -191,6 +211,25 @@ class Config:
         self.book_chunk_size = _int(
             "BOOK_CHUNK_SIZE", merged["BOOK_CHUNK_SIZE"], *_INT_RANGES["BOOK_CHUNK_SIZE"]
         )
+        # Comma-separated projection list, validated against what Betfair
+        # actually accepts. An unknown field is rejected at boot with the
+        # permitted set named, rather than becoming a DSC-0018 on the first
+        # catalogue call an hour later.
+        raw_projection = merged.get("CATALOGUE_PROJECTION", "").strip()
+        if not raw_projection:
+            raise ConfigError(
+                "CATALOGUE_PROJECTION must name at least one Betfair MarketProjection"
+            )
+        known_projection = {p.strip() for p in KNOWN_MARKET_PROJECTIONS.split(",") if p.strip()}
+        projection = [p.strip() for p in raw_projection.split(",") if p.strip()]
+        unknown_projection = [p for p in projection if p not in known_projection]
+        if unknown_projection:
+            raise ConfigError(
+                f"CATALOGUE_PROJECTION has unknown value(s) {unknown_projection}. "
+                f"Known values: {', '.join(sorted(known_projection))}"
+            )
+        self.catalogue_projection = projection
+
         self.catalogue_chunk_events = _int(
             "CATALOGUE_CHUNK_EVENTS",
             merged["CATALOGUE_CHUNK_EVENTS"],

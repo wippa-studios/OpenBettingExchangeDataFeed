@@ -66,7 +66,20 @@ CREATE INDEX IF NOT EXISTS market_poll_idx ON market (market_start_time)
     WHERE is_active;
 
 CREATE TABLE IF NOT EXISTS selection (
-    selection_id  BIGINT PRIMARY KEY,
+    -- selection_id is NOT unique on its own. Betfair REUSES selection ids
+    -- across markets: selection_id 1 is "0 - 0" in the Correct Score market of
+    -- every football match on the exchange. Keying on it alone made each
+    -- market's selection 1 overwrite the previous market's.
+    --
+    -- Measured on a real collection with the single-column key: 11,096 markets
+    -- produced only 3,034 markets' worth of selection rows, and 419 Correct
+    -- Score markets produced 10. Not merely missing rows -- market_id was left
+    -- pointing at whichever market wrote last, so the join to market returned
+    -- the WRONG runner name for most selections.
+    --
+    -- A selection is identified by its market plus its id, which is exactly how
+    -- the exchange addresses them.
+    selection_id  BIGINT      NOT NULL,
     market_id     TEXT        NOT NULL REFERENCES market(market_id),
     runner_name   TEXT,
     sort_priority INT,
@@ -74,7 +87,8 @@ CREATE TABLE IF NOT EXISTS selection (
     status        TEXT,
     is_active     BOOLEAN     NOT NULL DEFAULT TRUE,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (market_id, selection_id)
 );
 CREATE INDEX IF NOT EXISTS selection_market_idx ON selection (market_id, sort_priority);
 

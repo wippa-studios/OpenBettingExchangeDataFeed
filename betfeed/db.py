@@ -69,11 +69,52 @@ def advisory_lock(conn: psycopg.Connection, lock_id: int) -> Iterator[bool]:
 
 def migrate(conn: psycopg.Connection) -> None:
     conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate_selection_key(conn)
     conn.execute(
         "INSERT INTO schema_migrations (version) VALUES (1) ON CONFLICT (version) DO NOTHING"
     )
     conn.commit()
     log.info("schema applied")
+
+
+def _migrate_selection_key(conn: psycopg.Connection) -> None:
+    """Re-key `selection` from (selection_id) to (market_id, selection_id).
+
+    CREATE TABLE IF NOT EXISTS leaves an existing table alone, so fixing the
+    primary key in schema.sql does nothing to a database that already has one.
+    A Postgres primary key cannot be altered in place, but it can be dropped and
+    re-added, which preserves the rows.
+
+    The rows that DO survive are the ones whose (market_id, selection_id) pairs
+    happen to be unique -- which every row is, since selection_id was previously
+    the sole key. They are not all CORRECT (market_id may point at the wrong
+    market), but they are a strict subset of what is re-derivable and the next
+    fixtures run fills in the rest, because the ON CONFLICT target is now the
+    composite key. No row is lost and none is trusted.
+    """
+    row = conn.execute(
+        """
+        SELECT pg_get_constraintdef(oid) AS def
+          FROM pg_constraint
+         WHERE conrelid = 'selection'::regclass AND contype = 'p'
+        """
+    ).fetchone()
+    if row:
+        current = row["def"] if isinstance(row, dict) else row[0]
+        if "market_id" in current:
+            return  # already composite
+    # No primary key at all is a state this function can leave behind: the drop
+    # succeeds and the re-add can then fail, and a re-run that assumed "no
+    # constraint" meant "already migrated" would skip the repair forever. So an
+    # absent key is treated as "needs the composite key", not "done".
+    log.info("selection has no primary key; adding (market_id, selection_id)")
+    # No NOT VALID here: Postgres accepts it only on FOREIGN KEY and CHECK, not
+    # on a primary key. It is unnecessary anyway -- selection_id was the sole
+    # key, so every existing (market_id, selection_id) pair is already distinct
+    # and the constraint builds without a uniqueness failure.
+    conn.execute("ALTER TABLE selection DROP CONSTRAINT IF EXISTS selection_pkey")
+    conn.execute("ALTER TABLE selection ADD PRIMARY KEY (market_id, selection_id)")
+    log.info("selection re-keyed to (market_id, selection_id); rows refill on next run")
 
 
 def partition_name(day: date) -> str:

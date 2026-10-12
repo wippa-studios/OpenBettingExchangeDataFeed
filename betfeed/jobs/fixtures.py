@@ -249,7 +249,7 @@ def _upsert_selections(conn, rows: list) -> int:
         """
         INSERT INTO selection (selection_id, market_id, runner_name, sort_priority, handicap)
         VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (selection_id) DO UPDATE SET
+        ON CONFLICT (market_id, selection_id) DO UPDATE SET
             market_id     = EXCLUDED.market_id,
             runner_name   = EXCLUDED.runner_name,
             sort_priority = EXCLUDED.sort_priority,
