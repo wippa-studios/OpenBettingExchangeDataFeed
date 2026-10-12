@@ -9,6 +9,16 @@ This project is **pre-1.0**. There are no releases yet; changes land on `main`.
 
 ## [Unreleased]
 
+### Documentation
+
+- The README's "Results and settlement" section now states the two rules that
+  decide what a result is — a non-runner never settles or voids a market, and
+  void is read from Betfair's own `VOIDED` status, never inferred — and the
+  seven-day window for which a resolved market stays readable in both views.
+  Both are behaviour this release changed; a README that still described the old
+  rules would have been describing the bug.
+
+
 ### Fixed
 
 Everything below was found by running the collector against real Betfair and a

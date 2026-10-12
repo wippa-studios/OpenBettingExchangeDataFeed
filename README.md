@@ -1,5 +1,10 @@
 # OpenBettingExchangeDataFeed
 
+[![CI](https://github.com/wippa-studios/OpenBettingExchangeDataFeed/actions/workflows/ci.yml/badge.svg)](https://github.com/wippa-studios/OpenBettingExchangeDataFeed/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![python](https://img.shields.io/badge/python-%E2%89%A53.13-3776AB.svg)](pyproject.toml)
+[![Betfair Delay key](https://img.shields.io/badge/app%20key-Delay%20ready-8A2BE2)](#delay-key-limits)
+
 Two Betfair feeds on PostgreSQL, from one collector.
 
 | | **Feed 1** | **Feed 2** |
@@ -418,6 +423,36 @@ Three layers, because they have different reliability:
 2. **Sweep.** The fixtures job re-checks markets that finished while nothing was
    watching, over `RESULTS_BACKFILL_HOURS`.
 3. **Scores**, where the app key is authorised for the Scores API.
+
+### What a result is, and is not
+
+Two rules decide what counts, and both exist because the wrong version of each
+was measured on real data:
+
+**A market is settled only when Betfair says it is finished, or names a `WINNER`.**
+A `REMOVED` runner — a non-runner, a late withdrawal, which happens in most
+professional seasons — is **not** an outcome. The first implementation counted
+it as one, and a routine withdrawal produced `voided: true` on a market that was
+still `OPEN`; measured on a live poll, two "Match Specials" markets were reported
+as cancelled while their fixtures had not been played. The runner's status still
+travels through in `runners`, which is where a consumer applies its own
+non-runner rule — it just never settles or voids a market by itself.
+
+**Void is read, never inferred.** Only Betfair's own `VOIDED` status produces
+`voided: true`. A terminal market with no winner — abandoned, postponed — is
+settled with `voided: false` and an empty winner list, and the consumer's per-sport
+rule decides what that means.
+
+### A resolved market stays readable for seven days
+
+The collector marks a settled market `is_resolved = TRUE, is_active = FALSE` so
+the odds job stops polling it — and both views still publish it, for seven days
+by `retired_at`. This is not a nicety: filtering on `is_active` alone removed
+every settled market from both feeds, so the result was collected, stored, and
+then made invisible to exactly the consumer it was collected for. Measured: six
+rows in `market_result`, zero visible in `v_feed2`. A consumer settles within
+days, not weeks, and the bound keeps a long-running collector from accumulating
+every fixture it has ever seen.
 
 > **Feed 1 settles slowly, by design of the cadence.** The results sweep rides
 > inside the fixtures job, which defaults to every 12 h. A match finishing at
