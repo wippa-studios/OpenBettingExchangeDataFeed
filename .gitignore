@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.ropeproject
+
+# Credentials — never commit. .env holds a generated database password and,
+# usually, a Betfair app key.
+.env
+.env.*
+!.env.example
+
+# Betfair client certs and session tokens
+certs/
+*.pem
+
+# Local/test databases
+*.db
+.pytest_cache/
