@@ -321,13 +321,26 @@ def load_config(env_file: str | Path | None = None, overrides: dict | None = Non
     return Config(raw)
 
 
-def load_or_exit(env_file: str | Path | None = None) -> Config:
-    """Load config, aborting the process with a readable reason on bad input."""
+def load_or_exit(
+    env_file: str | Path | None = None, *, require_credentials: bool = True
+) -> Config:
+    """Load config, aborting the process with a readable reason on bad input.
+
+    `require_credentials=False` is for commands that never contact Betfair.
+    `migrate` only creates the database schema, and demanding an API key before
+    someone can create a database is a chicken-and-egg that CI is the first thing
+    to hit, on a fresh checkout:
+
+        [config] aborting: missing BETFAIR_APP_KEY
+        ##[error]Process completed with exit code 2.
+    """
     try:
         cfg = load_config(env_file)
     except ConfigError as e:
         print(f"[config] aborting: {e}", file=sys.stderr)
         raise SystemExit(2) from None
+    if not require_credentials:
+        return cfg
     missing = validate_credentials(cfg)
     if missing:
         print(f"[config] aborting: missing {', '.join(missing)}", file=sys.stderr)

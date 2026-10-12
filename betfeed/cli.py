@@ -174,7 +174,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     needs_db = args.command != "migrate"
-    cfg = load_or_exit()
+    # `migrate` only creates the schema; it never contacts Betfair, so it must
+    # not demand an API key. Found by CI: a fresh checkout running its first
+    # `betfeed migrate` aborted with "missing BETFAIR_APP_KEY".
+    cfg = load_or_exit(require_credentials=args.command != "migrate")
     _setup_logging(cfg.log_level)
     log = logging.getLogger("betfeed.cli")
 
