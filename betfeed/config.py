@@ -61,7 +61,16 @@ DEFAULTS: dict[str, str] = {
     # TOO_MUCH_DATA the client bisects instead of failing.
     "BOOK_CHUNK_SIZE": "40",
     "CATALOGUE_CHUNK_EVENTS": "100",
-    "CATALOGUE_MAX_RESULTS": "1000",
+    # 200, not 1000. Measured on a DELAY app key: at 500 Betfair answers
+    # ANGX-0001 / TOO_MUCH_DATA; 200 is accepted. Event-chunk size makes no
+    # difference (measured at 100, 50 and 25), only the result count does.
+    #
+    # This has to be the DEFAULT, not a value someone put in their .env: an
+    # embeddable package has to work on first boot with nothing configured, and
+    # Betfair hands out DELAY keys by default (two keys per registration, the
+    # Delay one active and the Live one inactive). A default that only works on a
+    # paid key is a default that breaks the first person to try it.
+    "CATALOGUE_MAX_RESULTS": "200",
     # DELAY-SAFE by default. VENUE and EVENT_RUNNER_DESCRIPTION are Live-key-only
     # and fail a Delay key's request outright with DSC-0018; everything else,
     # including MARKET_DESCRIPTION, works. Override only with a Live key.
@@ -162,9 +171,26 @@ class Config:
     def __init__(self, raw: dict[str, str]):
         self.raw = dict(raw)
 
+        # Merge the documented defaults FIRST, and read everything from `merged`.
+        #
+        # This used to happen ~30 lines further down, so the four settings above
+        # it read `raw` and never saw a default. The visible consequence was that
+        # a fresh checkout with NO .env could not boot at all:
+        #     ConfigError: EVENT_TYPE_IDS must list at least one Betfair event type id
+        # ...even though DEFAULTS says "1,8". It only ever worked because a .env
+        # happened to exist with the key spelled out.
+        #
+        # That matters beyond tidiness: the whole point of this package being
+        # embeddable is that a host application supplies the configuration —
+        # OpenBettingExchange passes credentials in as environment variables and
+        # never writes a .env at all. A config that cannot boot without a file it
+        # is not given is not embeddable, however correct it looks on a
+        # developer's machine where the file has always existed.
+        merged = {**DEFAULTS, **raw}
+
         self.database_url = self._require_url("DATABASE_URL")
-        self.locale = raw.get("BETFAIR_LOCALE", "en").strip() or "en"
-        self.login_mode = raw.get("BETFAIR_LOGIN_MODE", "password").strip().lower()
+        self.locale = merged.get("BETFAIR_LOCALE", "en").strip() or "en"
+        self.login_mode = merged.get("BETFAIR_LOGIN_MODE", "password").strip().lower()
         if self.login_mode not in {"password", "certs", "session_token"}:
             raise ConfigError(
                 f"BETFAIR_LOGIN_MODE must be password|certs|session_token, got {self.login_mode!r}"
@@ -176,7 +202,7 @@ class Config:
         self.certs_path = raw.get("BETFAIR_CERTS_PATH", "").strip()
         self.session_token = raw.get("BETFAIR_SESSION_TOKEN", "").strip()
 
-        event_types = _csv("EVENT_TYPE_IDS", raw.get("EVENT_TYPE_IDS", ""))
+        event_types = _csv("EVENT_TYPE_IDS", merged.get("EVENT_TYPE_IDS", ""))
         if not event_types:
             raise ConfigError("EVENT_TYPE_IDS must list at least one Betfair event type id")
         unknown = [e for e in event_types if e not in KNOWN_EVENT_TYPES]
@@ -187,9 +213,8 @@ class Config:
             )
         self.event_type_ids = event_types
         self.event_type_names = {e: KNOWN_EVENT_TYPES[e] for e in event_types}
-        self.market_type_codes = _csv("MARKET_TYPE_CODES", raw.get("MARKET_TYPE_CODES", ""))
+        self.market_type_codes = _csv("MARKET_TYPE_CODES", merged.get("MARKET_TYPE_CODES", ""))
 
-        merged = {**DEFAULTS, **raw}
         self.fixtures_interval_minutes = _int(
             "FIXTURES_INTERVAL_MINUTES",
             merged["FIXTURES_INTERVAL_MINUTES"],

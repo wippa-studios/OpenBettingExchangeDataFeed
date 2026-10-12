@@ -19,7 +19,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-from .config import load_or_exit
+from .config import load_or_exit, validate_credentials
 from .db import connect, migrate
 from .feeds import feed_document, feed_health
 from .scheduler import run_collector, run_once
@@ -37,6 +37,106 @@ def _iso(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value)
+
+
+def _cmd_validate(cfg) -> int:
+    """Prove the configuration works, in the order a new user hits the problems.
+
+    Every check here corresponds to a failure that only showed up against real
+    Betfair and a real Postgres, and each one used to surface as a stack trace
+    from `betfeed run fixtures` instead of a sentence saying what to fix:
+
+      - a DELAY key rejects VENUE / EVENT_RUNNER_DIRECTORY projections and a
+        listMarketCatalogue over ~200 results, so the defaults are checked
+        against what this key actually accepts;
+      - login mode is wrong (password vs certs vs token) for the key you hold;
+      - the database is unreachable, or the schema has not been applied.
+
+    Exits non-zero on the first failure so a host application (or a CI step) can
+    gate on it.
+    """
+    from .betfair import BetfairClient, BetfairAuthError
+
+    ok = True
+
+    def check(label, fn):
+        nonlocal ok
+        try:
+            detail = fn()
+            print(f"  ok    {label}" + (f"  ({detail})" if detail else ""))
+        except Exception as exc:  # noqa: BLE001 - this is the reporting path
+            ok = False
+            print(f"  FAIL  {label}: {exc}")
+
+    print("configuration")
+    missing = validate_credentials(cfg)
+    check(
+        "Betfair credentials present",
+        lambda: "complete" if not missing else _fail("missing " + ", ".join(missing)),
+    )
+    check(
+        "catalogue projection is delay-safe",
+        lambda: (
+            "ok"
+            if not ({"VENUE", "EVENT_RUNNER_DESCRIPTION"} & set(cfg.catalogue_projection))
+            else _fail(
+                "VENUE / EVENT_RUNNER_DESCRIPTION are Live-key-only and fail a "
+                "DELAY key's request with DSC-0018"
+            )
+        ),
+    )
+    check(
+        "catalogue max_results within a DELAY key's limit",
+        lambda: (
+            f"{cfg.catalogue_max_results}"
+            if cfg.catalogue_max_results <= 200
+            else _fail(">200 is rejected with ANGX-0001 / TOO_MUCH_DATA on a DELAY key")
+        ),
+    )
+    check(
+        "book chunk within a DELAY key's limit",
+        lambda: (
+            f"{cfg.book_chunk_size}"
+            if cfg.book_chunk_size <= 40
+            else _fail(">40 is rejected with ANGX-0001 / TOO_MUCH_DATA on a DELAY key")
+        ),
+    )
+
+    print("database")
+    def _db():
+        with connect(cfg.database_url) as conn:
+            n = conn.execute("SELECT count(*) AS n FROM fixture").fetchone()["n"]
+            have = conn.execute(
+                "SELECT count(*) AS n FROM pg_tables WHERE schemaname='public'"
+            ).fetchone()["n"]
+            if have < 8:
+                raise RuntimeError(
+                    f"schema not applied ({have} tables) — run `betfeed migrate`"
+                )
+            return f"{have} tables, {n} fixtures"
+
+    check("connect and read", _db)
+
+    print("betfair")
+    def _login():
+        c = BetfairClient(cfg)
+        cl = c.client  # triggers login
+        types = cl.betting.list_event_types()
+        names = ",".join(sorted(t.event_type.name for t in types)[:4])
+        return f"{len(types)} event types ({names}…)"
+
+    check("login and list event types", _login)
+
+    print()
+    if ok:
+        print("ready — `betfeed run fixtures` will collect")
+        return 0
+    print("not ready — fix the FAIL lines above")
+    return 1
+
+
+def _fail(message):
+    raise RuntimeError(message)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--compact", action="store_true", help="one line per market")
 
     sub.add_parser("health", help="freshness and job status")
+    sub.add_parser(
+        "validate",
+        help="check configuration and credentials, then prove the connection works",
+    )
 
     args = parser.parse_args(argv)
 
@@ -79,6 +183,9 @@ def main(argv: list[str] | None = None) -> int:
             migrate(conn)
         print("schema applied")
         return 0
+
+    if args.command == "validate":
+        return _cmd_validate(cfg)
 
     if args.command == "collect":
         jobs = tuple(j.strip() for j in args.jobs.split(",") if j.strip())
