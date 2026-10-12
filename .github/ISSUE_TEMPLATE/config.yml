@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/wippa-studios/OpenBettingExchangeDataFeed/security/advisories/new
+    about: Report privately. Never open a public issue about a credential.
+  - name: Betfair API questions
+    url: https://support.developer.betfair.com/
+    about: App keys, weights, rate limits and the API reference are Betfair's to answer.

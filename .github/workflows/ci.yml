@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: uv sync --all-extras --dev
+      - name: Tests
+        run: uv run pytest -q
+
+  # The package must boot with NO .env, from environment variables alone.
+  # OpenBettingExchange embeds it that way and never writes a file; if that
+  # regresses, the plug-in is broken for every user who has not already made a
+  # .env by hand.
+  embeddable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.13'
+      - run: uv sync --all-extras --dev
+      - name: Boots from the environment with no .env
+        env:
+          DATABASE_URL: postgresql://u:p@127.0.0.1:5432/db
+          BETFAIR_APP_KEY: k
+          BETFAIR_USERNAME: u
+          BETFAIR_PASSWORD: p
+        run: |
+          uv run python -c "
+          from betfeed.config import load_config, validate_credentials
+          c = load_config(env_file='/tmp/definitely-absent.env')
+          assert not validate_credentials(c), validate_credentials(c)
+          assert ','.join(sorted(c.event_type_names)) == '1,8', c.event_type_names
+          # Delay-key safe defaults. Measured, not guessed — see README.
+          assert c.catalogue_max_results <= 200, c.catalogue_max_results
+          assert c.book_chunk_size <= 40, c.book_chunk_size
+          proj = set(c.catalogue_projection)
+          assert not (proj & {'VENUE', 'EVENT_RUNNER_DESCRIPTION'}), proj
+          assert 'MARKET_DESCRIPTION' in proj, proj
+          print('embeddable OK')
+          "
+
+  # .env.example is documentation: it is the file users copy. If a value there
+  # drifts from the real default, someone inherits a setting that does not work.
+  env-example:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.13'
+      - run: uv sync --all-extras --dev
+      - name: .env.example matches the real defaults
+        run: |
+          uv run python -c "
+          import re, sys
+          from betfeed.config import DEFAULTS
+          example = {}
+          for line in open('.env.example'):
+              m = re.match(r'^([A-Z_]+)=(.*)$', line.strip())
+              if m:
+                  example[m.group(1)] = m.group(2)
+          bad = []
+          for key, default in DEFAULTS.items():
+              if key not in example:
+                  bad.append(f'{key}: missing from .env.example')
+              elif example[key] != default:
+                  bad.append(f'{key}: example={example[key]!r} default={default!r}')
+          if bad:
+              print('\n'.join(bad)); sys.exit(1)
+          print('.env.example matches DEFAULTS')
+          "
+
+  # A real Postgres, because several bugs here only appear against one:
+  # partition creation, JSONB adaptation, and the composite selection key.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: betfeed
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:pw@localhost:5432/betfeed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.13'
+      - run: uv sync --all-extras --dev
+      - name: Schema applies cleanly (idempotent)
+        run: |
+          uv run betfeed migrate
+          uv run betfeed migrate
+      - name: Expected objects exist
+        run: |
+          uv run python -c "
+          from betfeed.config import load_config
+          from betfeed.db import connect
+          cfg = load_config()
+          with connect(cfg.database_url) as c:
+              tables = {r['tablename'] for r in c.execute(
+                  \"SELECT tablename FROM pg_tables WHERE schemaname='public'\").fetchall()}
+              views = {r['viewname'] for r in c.execute(
+                  \"SELECT viewname FROM pg_views WHERE schemaname='public'\").fetchall()}
+              need_t = {'fixture','market','selection','market_odds_current',
+                        'market_snapshot','market_result','event_score',
+                        'fixture_change','feed_run'}
+              missing = need_t - tables
+              assert not missing, f'missing tables: {missing}'
+              assert {'v_feed1','v_feed2'} <= views, f'missing views: {views}'
+              # The composite key is the whole point of a schema-level test:
+              # a single-column selection_id lets markets overwrite each other.
+              pk = c.execute(\"SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint \"
+                             \"WHERE conrelid='selection'::regclass AND contype='p'\").fetchone()
+              assert pk and 'market_id' in pk['d'], pk
+              print('schema OK')
+          "
+      - name: Selection PK survives a re-migrate
+        run: uv run betfeed migrate
+
+  # Credentials must never be committed.
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: .env and certs are not tracked
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked — it holds a Betfair password"; exit 1
+          fi
+          if git ls-files --error-unmatch certs >/dev/null 2>&1; then
+            echo "::error::certs/ is tracked — it holds private key material"; exit 1
+          fi
+      - name: No private key material
+        run: |
+          if git grep -qE -- 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY' -- . \
+             ':!tests' ':!README.md' ':!CONTRIBUTING.md'; then
+            echo "::error::private key material is committed"; exit 1
+          fi
+      - name: No absolute machine paths
+        run: |
+          if git grep -nE '(^|[^a-zA-Z])/(home|Users)/[a-z]+/' -- '*.py' '*.md' \
+             ':!README.md' ':!CONTRIBUTING.md' ':!CHANGELOG.md'; then
+            echo "::error::machine-absolute path committed — passes locally, fails elsewhere"; exit 1
+          fi
