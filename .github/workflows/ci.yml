@@ -15,6 +15,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # include-only, NOT a list plus include. Two lists would be a CARTESIAN
+        # product — `python: [3.13, 3.14]` x `experimental: [false, true]` is
+        # four jobs, two of which are nonsense (3.14 marked as blocking, 3.13
+        # marked as experimental). `include` extends a matrix; on its own it
+        # defines one.
+        #
         # 3.13 is what the project supports (pyproject: requires-python >=3.13).
         # 3.14 is experimental and does not block, because an UPSTREAM dependency
         # cannot be installed there yet:
@@ -25,14 +31,12 @@ jobs:
         # fault, and pretending 3.14 is supported would be a false claim. This
         # entry turns green by itself when upstream ships the wheel, which is
         # exactly when we should find out.
-        python: ['3.13', '3.14']
-        experimental: ['false', 'true']
         include:
           - python: '3.13'
-            experimental: 'false'
+            experimental: false
           - python: '3.14'
-            experimental: 'true'
-    continue-on-error: ${{ matrix.experimental == 'true' }}
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
