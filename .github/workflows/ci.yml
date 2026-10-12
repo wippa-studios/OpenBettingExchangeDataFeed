@@ -15,11 +15,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matches pyproject's `requires-python = ">=3.13"`. The matrix previously
-        # listed 3.11 and 3.12, which uv refuses outright:
-        #   error: The requested interpreter resolved to Python 3.11.17, which is
-        #   incompatible with the project's Python requirement: `>=3.13`
+        # 3.13 is what the project supports (pyproject: requires-python >=3.13).
+        # 3.14 is experimental and does not block, because an UPSTREAM dependency
+        # cannot be installed there yet:
+        #   error: Failed to build `pydantic-core==2.33.2`
+        #   cause: Call to `maturin.build_wheel` failed
+        # pydantic-core ships no 3.14 wheels, so uv falls back to compiling it
+        # from Rust on the runner and fails. Nothing in this package is at
+        # fault, and pretending 3.14 is supported would be a false claim. This
+        # entry turns green by itself when upstream ships the wheel, which is
+        # exactly when we should find out.
         python: ['3.13', '3.14']
+        experimental: ['false', 'true']
+        include:
+          - python: '3.13'
+            experimental: 'false'
+          - python: '3.14'
+            experimental: 'true'
+    continue-on-error: ${{ matrix.experimental == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

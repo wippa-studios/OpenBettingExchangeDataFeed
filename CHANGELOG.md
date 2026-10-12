@@ -91,6 +91,17 @@ are the bugs that made it impossible rather than merely wrong.
 - Documentation: README, CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, CHANGELOG,
   issue and PR templates, and CI.
 
+### CI
+
+- Tests on 3.13. **3.14 is experimental and non-blocking**: `pydantic-core` ships
+  no 3.14 wheels, so `uv` tries to compile it from Rust and the runner cannot
+  build it. Nothing in this package is at fault, and claiming 3.14 support would
+  be false. The job turns green by itself when upstream ships the wheel.
+- A real PostgreSQL, because several bugs here only appear against one.
+- `.env.example` must match `DEFAULTS` — it is the file users copy.
+- The package must boot with **no `.env`**, which is the embedding contract.
+- No credential, private key or machine-absolute path may be committed.
+
 ### Known limitations
 
 - **Data is 5 minutes behind.** This is a Delay key. Betfair withholds
