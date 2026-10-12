@@ -207,7 +207,22 @@ SELECT f.fixture_id,
 FROM fixture f
 JOIN market m    ON m.fixture_id = f.fixture_id
 JOIN selection s ON s.market_id  = m.market_id
-WHERE f.is_active AND m.is_active AND s.is_active;
+-- Resolved markets ARE published, and this is the one line that makes results
+-- reachable at all.
+--
+-- write_result() marks a settled market `is_resolved = TRUE, is_active = FALSE`
+-- (and its selections likewise) so the odds job stops polling it — that part is
+-- right. But filtering the view on is_active alone then REMOVES the settled
+-- market from both feeds, so a consumer can never read the result it just
+-- collected: measured on a real run, 6 markets in market_result and 0 visible
+-- in v_feed2. Auto-settlement silently never fires.
+--
+-- Bounded to RESOLVED_RETENTION_DAYS so a long-running collector does not
+-- accumulate every match it has ever seen. A venue settles within days, not
+-- weeks, and seven is generous.
+WHERE f.is_active
+  AND (m.is_active OR (m.is_resolved AND m.retired_at > now() - interval '7 days'))
+  AND (s.is_active OR m.is_resolved);
 
 -- Feed 2: feed 1 plus the newest odds and the result, if we have one.
 -- Prices come out of the ladder JSONB with a LATERAL, so the read is one

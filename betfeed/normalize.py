@@ -192,15 +192,30 @@ def result_from_book(book: dict, *, observed_at: datetime | None = None) -> dict
     status = (book["status"] or "").upper()
     runners = book["selections"]
     winners = [s["selection_id"] for s in runners if (s["status"] or "").upper() == "WINNER"]
-    losers = [s["selection_id"] for s in runners if (s["status"] or "").upper() in LOSING_STATUSES]
 
-    settled = status in TERMINAL_STATUSES or bool(winners or losers)
+    # A market is settled when Betfair says it is finished, or when it has named
+    # a WINNER. Nothing else.
+    #
+    # The previous rule was `status in TERMINAL_STATUSES or winners or losers`,
+    # with LOSING_STATUSES including REMOVED*. That voided markets: a football
+    # fixture with one non-runner — a late withdrawal, which is routine — had
+    # losers, no winners, a status of OPEN, and therefore produced
+    # {voided: true}. A market still open on Betfair was reported as a cancelled
+    # event. Measured on a real poll: market 1.263751637, status OPEN,
+    # voided true. Settlement consuming that voids a live match.
+    #
+    # A REMOVED runner is not an outcome; it is an INPUT to one. The runner's
+    # status still travels through in `runners`, which is where a consumer
+    # applies its own non-runner rule (see docs/FEED.md) — but it must never,
+    # by itself, settle or void a market.
+    settled = status in TERMINAL_STATUSES or bool(winners)
     if not settled:
         return None
 
-    voided = bool(losers) and not winners and status not in ("VOIDED",)
-    if status == "VOIDED":
-        voided = True
+    # Void comes only from Betfair saying the market was voided. Inferring it
+    # from "no winner and something went REMOVED" confuses a non-runner with a
+    # cancellation.
+    voided = status == "VOIDED"
 
     return {
         "market_id": book["market_id"],

@@ -373,3 +373,78 @@ def test_migrate_does_not_require_betfair_credentials(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL")
     with pytest.raises(SystemExit):
         load_or_exit(absent, require_credentials=False)
+
+
+# ── a non-runner must never void a market ────────────────────────────────────
+#
+# This is the rule most likely to cost real money, and it was wrong.
+#
+# The old rule was: settled if the status is terminal OR any runner is
+# WINNER/LOSER/REMOVED, and voided if there were losers but no winners and the
+# status was not "VOIDED". A football fixture with one non-runner — a late
+# withdrawal, which happens in most professional seasons — therefore produced
+# {voided: true} while still OPEN on Betfair. Measured on a live poll: market
+# 1.263751637, status OPEN, voided true. A settlement consumer reading that
+# cancels a match that has not been played.
+
+
+def _book(status, runners):
+    return normalise_book(FakeMarketBook(
+        "1.1",
+        [FakeRunnerBook(i, status=st) for i, st in runners],
+        status=status,
+    ))
+
+
+@pytest.mark.parametrize("status", ["OPEN", "OPEN_FOR_STREAMING", "OPEN_FOR_BETTING"])
+def test_an_open_market_with_a_removed_runner_is_not_a_result(status):
+    """A REMOVED runner is routine (a substitution, a withdrawal). It is not an
+    outcome, and must not settle or void the market it belongs to."""
+    assert result_from_book(_book(status, [(1, "ACTIVE"), (2, "REMOVED")])) is None
+
+
+@pytest.mark.parametrize("removed", ["REMOVED", "REMOVED_HALF_TIME", "REMOVED_OTHER"])
+def test_no_variant_of_removed_voids_a_market(removed):
+    assert result_from_book(_book("OPEN", [(1, "ACTIVE"), (2, removed)])) is None
+
+
+def test_a_loser_without_a_terminal_status_is_not_a_result():
+    """Betfair can mark a runner LOSER a moment before the market closes. That
+    window is not a settlement, and treating it as one would settle early."""
+    assert result_from_book(_book("OPEN", [(1, "LOSER"), (2, "ACTIVE")])) is None
+
+
+def test_a_winner_settles_immediately_even_before_the_status_turns_terminal():
+    """The other side of the same race: a named winner is unambiguous, so it is
+    safe to act on even in the window before the market status catches up."""
+    result = result_from_book(_book("OPEN", [(1, "WINNER"), (2, "LOSER")]))
+    assert result is not None
+    assert result["winner_selection_ids"] == [1]
+    assert result["voided"] is False
+
+
+def test_only_betfairs_own_voided_status_voids_a_market():
+    """Void is read, never inferred. Inferring it from 'no winner and something
+    was REMOVED' is exactly the bug above wearing a different hat."""
+    assert result_from_book(_book("VOIDED", [(1, "REMOVED"), (2, "REMOVED")]))["voided"] is True
+
+
+def test_a_terminal_market_with_no_winner_is_settled_but_not_void():
+    """An abandoned or postponed fixture: finished, but not cancelled by
+    Betfair. The consumer applies the sport's own rule; this layer must not
+    decide it."""
+    result = result_from_book(_book("CLOSED", [(1, "REMOVED")]))
+    assert result is not None
+    assert result["voided"] is False
+    assert result["winner_selection_ids"] == []
+
+
+def test_a_non_runner_still_reaches_the_consumer():
+    """The signal is not suppressed — it is just not an outcome. A consumer
+    applies its own non-runner rule from the runner statuses, so dropping them
+    here would remove information the venue needs."""
+    result = result_from_book(_book("CLOSED", [(1, "REMOVED"), (2, "WINNER")]))
+    assert result["voided"] is False
+    assert result["winner_selection_ids"] == [2]
+    statuses = {r["selection_id"]: r["status"] for r in result["runners"]}
+    assert statuses[1] == "REMOVED", "the non-runner is still reported"
