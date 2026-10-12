@@ -100,10 +100,24 @@ def ensure_partitions(conn: psycopg.Connection, *, ahead_days: int = 3, behind_d
             if cur.fetchone():
                 continue
             # Name is built from a date, so it cannot inject SQL.
+            #
+            # The bounds are inlined as literals, NOT bound parameters. A
+            # partition bound is not a normal expression context: Postgres
+            # refuses to infer a parameter's type in
+            # `FOR VALUES FROM ($1) TO ($2)`, so the first fixtures run died with
+            #   IndeterminateDatatype: could not determine data type of parameter $1
+            # before collecting a single market. Casting the parameter
+            # (`%s::date`) does not help either — it still cannot resolve.
+            #
+            # Inlining is safe here and no weaker than the line above it: `day`
+            # is a `datetime.date` derived from the clock, `isoformat()` always
+            # yields YYYY-MM-DD, and the partition NAME built from the same value
+            # is already interpolated into this statement.
+            lo = day.isoformat()
+            hi = (day + timedelta(days=1)).isoformat()
             cur.execute(
                 f"CREATE TABLE IF NOT EXISTS {partition_name(day)} "
-                f"PARTITION OF market_snapshot FOR VALUES FROM (%s) TO (%s)",
-                (day.isoformat(), (day + timedelta(days=1)).isoformat()),
+                f"PARTITION OF market_snapshot FOR VALUES FROM ('{lo}') TO ('{hi}')"
             )
             created += 1
     conn.commit()

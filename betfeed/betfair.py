@@ -97,12 +97,47 @@ class BetfairClient:
     def _build_client(self) -> APIClient:
         cfg = self.cfg
         if cfg.login_mode == "certs":
-            return APIClient(app_key=cfg.app_key, certs=cfg.certs_path)
+            # Two library requirements that only bite in certs mode, both found
+            # against a live login rather than by reading the signature:
+            #
+            #  - `username` is a REQUIRED positional argument of APIClient.
+            #    Passing only app_key + certs raises
+            #    `TypeError: missing 1 required positional argument: 'username'`.
+            #  - the password is required too. `BaseClient.__init__` calls
+            #    `get_password()`, which raises `PasswordError` when the password
+            #    is None — and cert auth does not avoid that. betfairlightweight
+            #    2.20.x always POSTs to `identity_cert_uri + certlogin` and
+            #    always sends {"username", "password"} in the body; the CLIENT
+            #    CERTIFICATE is what proves identity, the password just
+            #    identifies the account. So there is no "cert-only" login that
+            #    omits it, and omitting it looks like a missing password rather
+            #    than a wrong auth mode.
+            return APIClient(
+                username=cfg.username or "",
+                password=cfg.password,
+                app_key=cfg.app_key,
+                certs=cfg.certs_path,
+            )
         if cfg.login_mode == "session_token":
             client = APIClient(username=cfg.username or None, app_key=cfg.app_key)
             client.set_session_token(cfg.session_token)
             return client
-        return APIClient(username=cfg.username, password=cfg.password, app_key=cfg.app_key)
+        # PASSWORD MODE DOES NOT NEED A CLIENT CERTIFICATE — but betfairlightweight
+        # resolves one anyway. `BaseClient.cert` falls back to `os.listdir('/certs')`
+        # whenever `cert_files` is None, and `Login.request` passes `cert=self.cert`
+        # on every login POST. So on any machine without a /certs directory,
+        # password login died with
+        #   CertsError: [Errno 2] No such file or directory: '/certs'
+        # BEFORE ever contacting Betfair — an error that reads like a missing
+        # certificate rather than a missing directory, and pointed at 2FA and
+        # certs as the fix when the real answer was the account's own auth mode.
+        #
+        # `cert_files=""` short-circuits the property (it only checks `is not
+        # None`) and requests treats the empty string as no certificate. Passing
+        # it explicitly beats monkey-patching the property, and beats creating
+        # an empty /certs directory, which would then fail a step later with
+        # "Certificates not found in directory" instead.
+        return APIClient(username=cfg.username, password=cfg.password, app_key=cfg.app_key, cert_files="")
 
     def login(self, force: bool = False) -> None:
         """Log in if we are not already holding a live session."""

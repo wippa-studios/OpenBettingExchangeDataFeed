@@ -100,7 +100,25 @@ fi
 DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}"
 
 echo "==> Writing DATABASE_URL to $ENV_FILE"
+
+# The file must be OWNED BY THE OPERATOR, not by root.
+#
+# This script has to run under sudo (it installs packages and writes to
+# /var), so anything it creates is root-owned by default. It then chmods .env
+# to 600 — which locks the operator OUT of the very file the next step tells
+# them to edit, and out of every later `betfeed` run, since the collector reads
+# .env as the invoking user. Observed on a real run: `PermissionError: .env`
+# from load_config, with the credentials already present and correct.
+#
+# So: remember who ran sudo, and hand the file back to them. 600 stays — the
+# file holds a Betfair password and a database password.
+INVOKING_USER="${SUDO_USER:-${USER:-root}}"
+INVOKING_GROUP="$(id -gn "$INVOKING_USER" 2>/dev/null || echo "$INVOKING_USER")"
+
 if [[ -f "$ENV_FILE" ]]; then
+    if [[ -w "$ENV_FILE" || ! -O "$ENV_FILE" ]]; then
+        chown "$INVOKING_USER:$INVOKING_GROUP" "$ENV_FILE" 2>/dev/null || true
+    fi
     chmod 600 "$ENV_FILE"
     if grep -qE '^DATABASE_URL=' "$ENV_FILE"; then
         # sed -i| is GNU-only; the temp-file form works everywhere.
@@ -115,8 +133,17 @@ if [[ -f "$ENV_FILE" ]]; then
 else
     cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
     printf '\nDATABASE_URL=%s\n' "$DATABASE_URL" >> "$ENV_FILE"
+    chown "$INVOKING_USER:$INVOKING_GROUP" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    echo "    created .env from .env.example — add your Betfair app key next"
+    echo "    created .env from .env.example (owned by ${INVOKING_USER}) — add your Betfair app key next"
+fi
+
+# A 600 file is only useful if the operator can actually open it. If the chown
+# did not take (unusual: NFS, a shared filesystem, a container), say so loudly
+# rather than leaving a PermissionError to be discovered later.
+if ! sudo -u "$INVOKING_USER" test -r "$ENV_FILE" 2>/dev/null; then
+    echo "!! WARNING: $ENV_FILE is not readable by ${INVOKING_USER}." >&2
+    echo "!! Run:  sudo chown ${INVOKING_USER}:${INVOKING_GROUP} $ENV_FILE" >&2
 fi
 
 echo
