@@ -375,6 +375,111 @@ def test_a_voided_market_is_marked_voided(db):
     assert list(result["winner_selection_ids"]) == []
 
 
+def test_a_result_survives_the_same_run_that_retires_the_market(db):
+    """The collector was down when the event settled, and Betfair has since
+    stopped listing it — the exact case _sweep_results exists for.
+
+    Retiring first set is_active=FALSE, and unresolved_scope filters on
+    is_active, so one run retired exactly the market it was there to resolve:
+    inactive, unresolved, invisible, and no later job able to pick it up. The
+    result was lost, not delayed.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    # Time passes: last seen and kicked off 30 hours ago, inside the 48h
+    # results backfill window and past the 24h retirement threshold.
+    db.execute("""
+        UPDATE market
+           SET last_seen_at      = now() - interval '30 hours',
+               market_start_time  = now() - interval '30 hours'
+    """)
+    db.commit()
+
+    # ...and Betfair no longer lists it at all, which is what arms retirement.
+    betting.events = {}
+    betting.catalogue = {}
+    betting.books = {
+        "1.100": settled_book("1.100", [FakeRunnerBook(11, status="WINNER"),
+                                        FakeRunnerBook(12, status="LOSER"),
+                                        FakeRunnerBook(13, status="LOSER")]),
+    }
+
+    stats = run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    assert stats["results"] == 1
+    row = db.execute("SELECT is_resolved, is_active FROM market WHERE market_id='1.100'").fetchone()
+    assert row["is_resolved"] is True
+    assert db.execute(
+        "SELECT count(*) n FROM market_result WHERE market_id='1.100'"
+    ).fetchone()["n"] == 1
+    # And the result is readable by a consumer.
+    doc = feed_document(db, priced=True, include_finished=True, market_ids=["1.100"])
+    assert doc["events"][0]["markets"][0]["result"]["winners"] == ["11"]
+
+
+def test_a_market_inside_the_backfill_window_is_not_retired_unresolved(db):
+    """Retirement is permanent; the sweep's LIMIT means "not resolved yet" is
+    not the same as "cannot be resolved". A market that started inside
+    RESULTS_BACKFILL_HOURS survives a stale last_seen_at so a later run can
+    still resolve it."""
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    db.execute("""
+        UPDATE market
+           SET last_seen_at     = now() - interval '30 hours',
+               market_start_time = now() - interval '2 hours'
+    """)
+    db.commit()
+
+    betting.events = {}
+    betting.catalogue = {}
+    betting.books = {}  # Betfair returns nothing fetchable for it
+    stats = run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    assert stats["results"] == 0
+    assert stats["retired"] == 0
+    assert db.execute("SELECT is_active FROM market WHERE market_id='1.100'").fetchone()[
+        "is_active"] is True
+
+    # Past the window it does retire — the protection is bounded, not a
+    # permanent amnesty.
+    db.execute("UPDATE market SET market_start_time = now() - interval '5 days'")
+    db.commit()
+    stats = run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    assert stats["retired"] == 2
+
+
+def test_the_results_sweep_runs_before_retirement(db, monkeypatch):
+    """Pins the order itself.
+
+    The behaviour tests above cannot distinguish "swept first" from "never
+    retired", because both produce a stored result. If the two calls are ever
+    swapped back, this is what notices.
+    """
+    from betfeed.jobs import fixtures as fixtures_job
+
+    order: list[str] = []
+    for name in ("_sweep_results", "_retire_missing"):
+        real = getattr(fixtures_job, name)
+
+        def spy(*a, _real=real, _name=name, **k):
+            order.append(_name)
+            return _real(*a, **k)
+
+        monkeypatch.setattr(fixtures_job, name, spy)
+
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    assert order[:2] == ["_sweep_results", "_retire_missing"]
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

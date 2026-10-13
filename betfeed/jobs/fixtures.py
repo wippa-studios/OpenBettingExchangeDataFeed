@@ -54,8 +54,13 @@ def run_fixtures(conn: psycopg.Connection, client: BetfairClient, cfg: Config) -
             _cache_event_types(conn, client, cfg)
             for event_type_id in cfg.event_type_ids:
                 _collect_sport(conn, client, cfg, event_type_id, stats)
-            _retire_missing(conn, stats)
+            # SWEEP FIRST. _retire_missing sets is_active=FALSE, and
+            # unresolved_scope filters on is_active — so retiring first meant
+            # the run retired exactly the markets it was there to resolve. They
+            # ended the run inactive, unresolved and invisible, with no later
+            # job able to pick them up: the result was lost, not delayed.
             _sweep_results(conn, client, cfg, stats)
+            _retire_missing(conn, stats, protect_hours=cfg.results_backfill_hours)
             if cfg.scores_enabled:
                 _capture_scores(conn, client, cfg, stats)
             # Anything we could not fetch is reported, so a short feed is
@@ -265,11 +270,18 @@ def _upsert_selections(conn, rows: list) -> int:
     )
 
 
-def _retire_missing(conn, stats: dict) -> None:
+def _retire_missing(conn, stats: dict, *, protect_hours: int = 0) -> None:
     """Retire markets Betfair stopped listing.
 
     Only after STALE_AFTER_HOURS: a truncated response must not retire a sport.
     Retirement is what stops feed 2 spending odds calls on dead markets.
+
+    It is also permanent, so it must not fire on a market still inside the
+    results backfill window. ``protect_hours`` is that window: a market that
+    has already started and is still unresolved is one _sweep_results has not
+    managed to resolve *yet* — including one the sweep's own LIMIT meant it did
+    not reach this run — and retiring it would strand the result forever.
+    Markets outside the window have had their chance and retire as before.
     """
     rows = conn.execute(
         """
@@ -277,9 +289,15 @@ def _retire_missing(conn, stats: dict) -> None:
            SET is_active = FALSE, retired_at = now()
          WHERE is_active
            AND last_seen_at < now() - make_interval(hours => %s)
+           AND NOT (
+                 is_resolved = FALSE
+                 AND market_start_time IS NOT NULL
+                 AND market_start_time <  now()
+                 AND market_start_time > now() - make_interval(hours => %s)
+             )
         RETURNING market_id
         """,
-        (STALE_AFTER_HOURS,),
+        (STALE_AFTER_HOURS, protect_hours),
     ).fetchall()
     if not rows:
         return
