@@ -128,6 +128,12 @@ def ensure_partitions(conn: psycopg.Connection, *, ahead_days: int = 3, behind_d
     loudly, not let rows vanish into a catch-all that later blocks partition
     creation. Ranges are derived from the clock, so this is safe to call on
     every job start.
+
+    Deliberately does NOT commit. It is called inside ``JobRun``, whose whole
+    point is that the run's writes are one transaction; a commit here would
+    flush a poll's partial writes at the start of the very run that is
+    supposed to be all-or-nothing. The caller owns the commit — for both jobs
+    that is ``JobRun.__exit__``.
     """
     today = datetime.now(timezone.utc).date()
     days = [today + timedelta(days=i) for i in range(-behind_days, ahead_days + 1)]
@@ -161,7 +167,6 @@ def ensure_partitions(conn: psycopg.Connection, *, ahead_days: int = 3, behind_d
                 f"PARTITION OF market_snapshot FOR VALUES FROM ('{lo}') TO ('{hi}')"
             )
             created += 1
-    conn.commit()
     if created:
         log.info("created %d snapshot partition(s)", created)
     return created
@@ -255,9 +260,18 @@ class JobRun:
         self.items_ok = 0
         self.items_err = 0
         self._started = 0.0
+        self._outer_autocommit = True
 
     def __enter__(self) -> "JobRun":
         self._started = time.monotonic()
+        # psycopg3 only holds a transaction open when autocommit is off, and
+        # every caller connects with autocommit=True (the right default for a
+        # one-off read). Left alone, each statement below committed as it ran and
+        # the rollback() in __exit__ had nothing to undo — so a run that died
+        # halfway through left exactly the half-written state the docstring
+        # promises cannot happen, while feed_run showed a tidy red row.
+        self._outer_autocommit = self.conn.autocommit
+        self.conn.autocommit = False
         row = self.conn.execute(
             "INSERT INTO feed_run (job) VALUES (%s) RETURNING run_id", (self.job,)
         ).fetchone()
@@ -298,4 +312,11 @@ class JobRun:
                 self.conn.commit()
         except Exception:  # never let bookkeeping mask the real error
             log.exception("could not record feed_run row for job=%s", self.job)
+        finally:
+            # Hand the connection back the way the caller had it. Both branches
+            # above end with the connection idle, so this commits nothing.
+            try:
+                self.conn.autocommit = self._outer_autocommit
+            except Exception:  # pragma: no cover - psycopg refuses only mid-txn
+                log.exception("could not restore autocommit for job=%s", self.job)
         return False  # do not swallow exceptions

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from betfeed.betfair import BetfairClient
-from betfeed.db import connect, migrate
+from betfeed.db import connect, ensure_partitions, migrate
 from betfeed.feeds import feed_document, feed_health
 from betfeed.jobs import run_fixtures, run_odds
 from conftest import (
@@ -455,6 +455,33 @@ def test_a_failed_job_is_recorded_and_rolls_back(db):
     failed = db.execute("SELECT * FROM feed_run WHERE NOT ok ORDER BY run_id DESC LIMIT 1").fetchone()
     assert failed is not None
     assert "boom" in failed["error"]
+
+
+def test_partitioning_does_not_commit_the_callers_writes(db):
+    """ensure_partitions runs INSIDE the job's transaction, and must not commit.
+
+    It commits nothing itself; JobRun.__exit__ owns the commit. If it did
+    commit, it would flush a poll's partial writes at the start of the very run
+    that is supposed to be all-or-nothing (#14). No other test could see this,
+    because partitioning happens before the job's first write, so the commit
+    would have had nothing pending to flush.
+
+    A second connection is the only honest witness: it sees committed rows only.
+    """
+    other = connect(TEST_URL)
+    try:
+        db.autocommit = False
+        db.execute(
+            "INSERT INTO betfair_event_type (id, name, market_count) VALUES ('999', 'probe', 0)"
+        )
+        ensure_partitions(db, behind_days=2, ahead_days=3)
+        assert other.execute(
+            "SELECT 1 FROM betfair_event_type WHERE id = '999'"
+        ).fetchone() is None, "ensure_partitions committed the caller's pending write"
+        db.rollback()
+    finally:
+        db.autocommit = True
+        other.close()
 
 
 def test_a_second_connection_cannot_take_the_same_lock(db):
