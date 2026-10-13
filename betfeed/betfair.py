@@ -2,10 +2,13 @@
 
 Two things this module exists to get right, both learned the hard way:
 
-1. **Login must not require a human.** ``APIClient.login_interactive()`` blocks
-   on stdin for a one-time password, which is fine for an LLM at a terminal and
-   fatal for a cron job. Three non-interactive modes are supported: username +
-   password, client certs, or a cached session token.
+1. **Login must not require a human.** There are three non-interactive modes —
+   username + password, client certs, or a cached session token — and none of
+   them reads stdin. (The module used to claim ``login_interactive()`` blocks
+   on stdin for a one-time password, which is false: against the pinned
+   betfairlightweight 2.24.0 it is a plain POST to ``identity_uri + "login"``
+   and never touches stdin. It is nevertheless the right call for password mode
+   — see ``login()`` — so only the reasoning was wrong.)
 
 2. **Betfair caps a request by *weight*, not by count.** listMarketBook with
    price projections must stay under 200 weight points, and listMarketCatalogue
@@ -14,7 +17,10 @@ Two things this module exists to get right, both learned the hard way:
    an account with unusual market shapes still completes.
 
 Requests that are genuinely unrecoverable raise. Requests that are merely
-transient are retried with backoff. Nothing is silently swallowed.
+transient are retried with backoff. The exceptions are the two "cannot recover,
+record it and carry on" paths — a single event that exceeds the catalogue cap,
+and a single market too heavy for listMarketBook — which are counted in
+``truncated_events`` / ``unfetchable_markets`` and reported to the caller.
 """
 
 from __future__ import annotations
@@ -326,8 +332,9 @@ class BetfairClient:
         A *single* event that saturates the cap cannot be recovered: the API
         has no market-level pagination. That event is recorded in
         ``truncated_events`` so the caller can log it, rather than being
-        silently short. With the 1000 default this needs an event with a
-        thousand markets and should not occur.
+        silently short. At the 200-market default that is a big football match —
+        the realistic order of magnitude, not the thousand-market edge the
+        comment here used to claim.
         """
         pending = [list(c) for c in chunked(list(event_ids), self.cfg.catalogue_chunk_events)]
         while pending:

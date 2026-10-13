@@ -85,7 +85,13 @@ def _db():
     return connect(_cfg().database_url)
 
 
-mcp = FastMCP(name="betfair_exchange_server", settings={"host": "0.0.0.0"})
+# No `settings={"host": ...}` here. The server runs transport="stdio" and binds
+# no socket, so the setting was inert — but it was set to 0.0.0.0, the
+# "listen on every interface" value, and this server has NO authentication.
+# That is safe over stdio and unsafe the instant anyone switches the transport
+# to SSE/HTTP, which is a one-line change someone will eventually make in a
+# config rather than remembering this.
+mcp = FastMCP(name="betfair_exchange_server")
 
 
 # ── Betfair, live ──────────────────────────────────────────────────────────

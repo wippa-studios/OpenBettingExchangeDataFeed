@@ -803,6 +803,29 @@ def test_limit_and_offset_are_clamped(db):
     assert MAX_MARKETS_PER_DOCUMENT == 1000
 
 
+def test_health_counts_runs_that_never_finished(db):
+    """ok = NULL is not ok and not failed, and was counted as neither.
+
+    A run killed by SIGKILL — or the committed-then-abandoned feed_run insert
+    from a job that died between __enter__ and __exit__ — stayed ok=NULL,
+    finished_at=NULL forever: invisible in ok_runs, failed_runs and
+    failed_recently.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    db.execute("INSERT INTO feed_run (job) VALUES ('fixtures')")  # never finished
+    db.commit()
+
+    job = feed_health(db)["jobs"]["fixtures"]
+    assert job["ok_runs"] == 1
+    assert job["failed_runs"] == 0
+    assert job["unfinished_runs"] == 1
+    # ...and a NULL ok does not masquerade as a recent failure.
+    assert job["failed_recently"] is False
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

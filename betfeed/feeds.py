@@ -301,10 +301,18 @@ def feed_health(conn: psycopg.Connection) -> dict:
         SELECT fr.job,
                max(fr.finished_at) FILTER (WHERE fr.ok)          AS last_ok,
                max(fr.finished_at)                               AS last_finished,
+               -- `IS FALSE`, not `NOT fr.ok`: a run killed by SIGKILL, or the
+               -- committed-then-abandoned feed_run insert from a job that died
+               -- between __enter__ and __exit__, leaves ok = NULL and
+               -- finished_at = NULL forever. count(*) FILTER (WHERE NOT ok)
+               -- dropped those too, so they were invisible in every counter and
+               -- in failed_recently. The freshness alarm still goes stale, so
+               -- this was a reporting gap rather than a silent stall.
                bool_or(fr.ok IS FALSE) FILTER (
                    WHERE fr.finished_at > now() - interval '24 hours') AS failed_recently,
                count(*) FILTER (WHERE fr.ok)                     AS ok_runs,
-               count(*) FILTER (WHERE NOT fr.ok)                 AS failed_runs
+               count(*) FILTER (WHERE NOT fr.ok)                 AS failed_runs,
+               count(*) FILTER (WHERE fr.ok IS NULL)             AS unfinished_runs
           FROM feed_run fr
          GROUP BY fr.job
         """
@@ -381,6 +389,10 @@ def _job_health(row: dict) -> dict:
         "age_seconds": int((now - last).total_seconds()) if last else None,
         "ok_runs": row["ok_runs"],
         "failed_runs": row["failed_runs"],
+        # Runs that started and never finished: a process killed mid-run, or a
+        # crash between JobRun.__enter__ and __exit__. Never counted as either
+        # ok or failed before.
+        "unfinished_runs": row.get("unfinished_runs", 0),
         "failed_recently": bool(row["failed_recently"]),
     }
 

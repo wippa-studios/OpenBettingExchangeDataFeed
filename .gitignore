@@ -20,7 +20,20 @@ wheels/
 # Betfair client certs and session tokens
 certs/
 *.pem
+*.key
+
+# A credential file with an unexpected name is invisible to the CI guard,
+# which checks .env and certs/ BY NAME — and this repo holds real Betfair
+# credentials, which makes it the worst possible place for `git add .` to
+# sweep one up.
+.netrc
+pgpass
+secrets.json
+credentials.json
 
 # Local/test databases
 *.db
+*.db-wal
+*.db-shm
+*.sqlite
 .pytest_cache/

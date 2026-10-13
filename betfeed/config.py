@@ -38,7 +38,11 @@ KNOWN_EVENT_TYPES = {
 }
 
 DEFAULTS: dict[str, str] = {
-    "DATABASE_URL": "postgresql://betfair@127.0.0.1:5432/betfeed",
+    # DATABASE_URL is deliberately NOT here. _require_url reads self.raw, not
+    # the merged defaults, because no default is usable — the password is
+    # generated per install. Listing one anyway was a trap: Config({"..."} )
+    # raised "DATABASE_URL is required" despite DEFAULTS naming it, and CI's
+    # env-example job kept .env.example documenting a default that never works.
     # password = username/password non-interactive login, certs = client certs,
     # session_token = a cached token from a previous interactive login.
     "BETFAIR_LOGIN_MODE": "password",

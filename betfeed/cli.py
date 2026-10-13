@@ -46,7 +46,7 @@ def _cmd_validate(cfg) -> int:
     Betfair and a real Postgres, and each one used to surface as a stack trace
     from `betfeed run fixtures` instead of a sentence saying what to fix:
 
-      - a DELAY key rejects VENUE / EVENT_RUNNER_DIRECTORY projections and a
+      - a DELAY key rejects VENUE / EVENT_RUNNER_DESCRIPTION projections and a
         listMarketCatalogue over ~200 results, so the defaults are checked
         against what this key actually accepts;
       - login mode is wrong (password vs certs vs token) for the key you hold;
