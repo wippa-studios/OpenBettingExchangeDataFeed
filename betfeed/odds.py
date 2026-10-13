@@ -27,6 +27,12 @@ LADDER: tuple[tuple[int, int, int], ...] = (
 MIN_PRICE_CENTS = 101
 MAX_PRICE_CENTS = 100000
 
+# Tolerance for "was this already a whole number of cents?". 2.3 * 100 is
+# 229.99999999999997 in IEEE 754, so the test cannot be exact; 1e-6 cents is
+# ~1e10 times the noise and ~5 million times smaller than the half-step band
+# it has to reject.
+_CENT_EPSILON = 1e-6
+
 
 def price_to_cents(p: float) -> int:
     # A non-finite price used to raise deep inside _round_half_up's
@@ -137,7 +143,33 @@ def prev_tick(p: float) -> float:
 
 
 def valid_tick(p: float) -> bool:
-    c = price_to_cents(p)
+    """Is this EXACTLY a price on the Betfair ladder?
+
+    Exactness matters. This used to be `price_to_cents(p)` and a grid check,
+    but price_to_cents ROUNDS, so anything within half a step of a tick passed
+    and was then stored raw by normalize._rungs — measured True for 1.015,
+    2.015 and 1.999, none of which is a price Betfair quotes, and 1.015 went
+    into the database as 1.015 rather than 1.02.
+
+    Round first (so float noise like 2.3 * 100 == 229.99999999999997 still
+    reads as 230), then require the input to have BEEN that whole number of
+    cents. A price genuinely between ticks — 2.31 — stays rejected rather than
+    being snapped into something plausible, which is what the contract wants
+    too: a price we could not put on the ladder is dropped, not invented.
+    """
+    try:
+        value = float(p)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(value):
+        # Not a "not a tick" answer: a fault worth naming, as it always was.
+        return price_to_cents(value)  # raises ValueError with the reason
+    scaled = value * 100.0
+    if not math.isfinite(scaled):
+        return price_to_cents(value)  # raises ValueError: finite input, infinite scale
+    c = _round_half_up(scaled)
+    if abs(scaled - c) > _CENT_EPSILON:
+        return False  # within half a cent of a whole cent: not a real tick
     if c < MIN_PRICE_CENTS or c > MAX_PRICE_CENTS:
         return False
     band = band_for(c)

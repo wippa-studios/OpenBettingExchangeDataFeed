@@ -139,6 +139,32 @@ def test_a_value_that_is_not_a_price_is_not_a_probability():
     assert overround([2.0, -1.0]) is None
     assert overround([]) == -1.0  # no prices: still an answer, not a crash
 
+def test_valid_tick_is_exact_not_merely_within_half_a_step():
+    """price_to_cents ROUNDS, so the old check accepted anything within half a
+    step of a tick — and _rungs then stored the raw float. Measured True
+    before the fix for all three of these; none is a price Betfair quotes."""
+    for off in (1.015, 2.015, 1.999, 2.31, 1.005, 2.005):
+        assert not valid_tick(off), f"{off} is not a tick but passed"
+    # ...while every real tick still passes, including the ones whose float
+    # representation is not exact (2.3 * 100 == 229.99999999999997).
+    for good in (1.01, 1.5, 2.0, 2.02, 2.3, 2.5, 3.0, 3.05, 4.0, 4.1, 6.0, 6.2,
+                 10.0, 10.5, 20.0, 21.0, 30.0, 32.0, 50.0, 55.0, 100.0, 110.0, 1000.0):
+        assert valid_tick(good), f"{good} is a ladder tick and must stay valid"
+
+
+def test_off_ladder_prices_never_reach_the_database():
+    """The end-to-end half: _rungs stores the raw float, so a price that
+    passes the check is what a consumer reads."""
+    from betfeed.normalize import normalise_book
+
+    book = normalise_book(FakeMarketBook(
+        "1.1", [FakeRunnerBook(1, back=[(2.5, 100), (2.31, 50), (1.015, 10), (2.52, 20)])]
+    ))
+    prices = [r["price"] for r in book["selections"][0]["back"]]
+    assert prices == [2.5, 2.52]
+    assert 1.015 not in prices
+
+
 def test_a_market_status_with_stray_whitespace_still_settles(caplog):
     """' CLOSED '.upper() is still ' CLOSED ', which matches nothing.
 

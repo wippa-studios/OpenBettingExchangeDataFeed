@@ -88,6 +88,13 @@ def normalise_catalogue_market(m, event_type_id: str) -> dict:
 
 
 def _rungs(rungs: Iterable | None) -> list[dict]:
+    """Ladder rungs, each a price Betfair actually quotes.
+
+    valid_tick is exact, so this stores the raw float because it is already on
+    the ladder: a price that is not is dropped, not snapped into something
+    plausible-looking. (It was not always so — valid_tick rounded before
+    checking, so 1.015 passed and was stored as 1.015.)
+    """
     out: list[dict] = []
     for p in (rungs or []):
         price = getattr(p, "price", None)
