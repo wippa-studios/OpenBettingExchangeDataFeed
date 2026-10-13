@@ -340,12 +340,34 @@ def _sweep_results(conn, client: BetfairClient, cfg: Config, stats: dict) -> Non
 
     log.info("results sweep: %d unresolved market(s)", len(market_ids))
     captured = 0
-    for mb in client.list_market_book(market_ids, traded=False):
-        book = normalise_book(mb)
-        result = result_from_book(book, observed_at=datetime.now(timezone.utc))
-        if result:
-            write_result(conn, result)
-            captured += 1
+    # PER-MARKET ISOLATION, same as jobs/odds.py:_poll. This fetches up to
+    # RESULTS_BACKFILL_MAX_MARKETS closed books and had no guard at all, so one
+    # unreadable book — a status that is not a string, an SDK attribute that
+    # cannot be promoted, a DB error inside write_result — aborted the whole
+    # fixtures run, losing every remaining result AND _capture_scores.
+    #
+    # The iterator is driven by hand for the same reason as in _poll: a `try`
+    # around a `for` body cannot catch a failure raised by the iterator, and
+    # this client fetches paginated.
+    books = iter(client.list_market_book(market_ids, traded=False))
+    while True:
+        try:
+            mb = next(books)
+        except StopIteration:
+            break
+        except Exception:
+            log.warning("result stream failed after %d book(s); keeping what was collected",
+                        captured, exc_info=True)
+            break
+        try:
+            book = normalise_book(mb)
+            result = result_from_book(book, observed_at=datetime.now(timezone.utc))
+            if result:
+                write_result(conn, result)
+                captured += 1
+        except Exception as exc:
+            mid = getattr(mb, "market_id", None) or "?"
+            log.warning("skipping result for market %s: %s: %s", mid, type(exc).__name__, exc)
     stats["results"] += captured
     if captured:
         log.info("results sweep captured %d result(s)", captured)

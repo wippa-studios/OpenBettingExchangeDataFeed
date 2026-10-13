@@ -680,6 +680,66 @@ def test_a_resolved_market_is_not_resurrected_when_betfair_still_lists_it(db):
         "is_active"] is True
 
 
+class ExplodingBook:
+    """A market book whose fields the SDK cannot promote."""
+    market_id = "1.100"
+
+    def __getattr__(self, name):
+        raise RuntimeError(f"cannot promote {name}")
+
+
+class MixedBooks(FakeBetting):
+    """One unreadable book, then a perfectly good one."""
+
+    def list_market_book(self, market_ids=None, price_projection=None, locale=None):
+        return [
+            ExplodingBook(),
+            settled_book("1.200", [FakeRunnerBook(31, status="WINNER"),
+                                   FakeRunnerBook(32, status="LOSER")]),
+        ]
+
+
+def test_one_bad_book_does_not_abort_the_results_sweep(db):
+    """The sweep fetches up to RESULTS_BACKFILL_MAX_MARKETS closed books and
+    had no per-market guard, unlike the odds job's _poll. One unreadable book
+    aborted the entire fixtures run, losing every remaining result AND
+    _capture_scores."""
+    a = FakeEvent("3001", "Test Utd v Arsenal")
+    b = FakeEvent("3002", "Chelsea v City")
+    markets = {
+        "1.100": FakeCatalogueMarket("1.100", a, "MATCH_ODDS",
+                                     runners=[FakeRunnerCatalogue(11, "Test Utd", 1),
+                                              FakeRunnerCatalogue(12, "Draw", 2)],
+                                     start=NOW - timedelta(hours=1)),
+        "1.200": FakeCatalogueMarket("1.200", b, "MATCH_ODDS",
+                                     runners=[FakeRunnerCatalogue(31, "Chelsea", 1),
+                                              FakeRunnerCatalogue(32, "City", 2)],
+                                     start=NOW - timedelta(hours=1)),
+    }
+    betting = FakeBetting(
+        events={"1": [FakeEventResult(a), FakeEventResult(b)]},
+        catalogue={"3001": [markets["1.100"]], "3002": [markets["1.200"]]},
+    )
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    # Stale and past their start time, so the next run's sweep sees them; and
+    # no longer in the catalogue, so nothing re-touches them first.
+    db.execute("UPDATE market SET last_seen_at = now() - interval '30 hours'")
+    db.commit()
+    betting.events = {}
+    betting.catalogue = {}
+
+    cfg = make_cfg(DATABASE_URL=TEST_URL, SCORES_ENABLED="true")
+    client = BetfairClient(cfg, sleeper=lambda _s: None)
+    install_fake_client(client, betting=MixedBooks(), scores=FakeScores())
+    stats = run_fixtures(db, client, cfg)
+
+    assert stats["results"] == 1, "one bad book cost the whole sweep"
+    assert db.execute("SELECT market_id FROM market_result").fetchone()["market_id"] == "1.200"
+    assert db.execute(
+        "SELECT ok FROM feed_run WHERE job='fixtures' ORDER BY run_id DESC LIMIT 1"
+    ).fetchone()["ok"] is True
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):
