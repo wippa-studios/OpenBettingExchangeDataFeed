@@ -227,6 +227,13 @@ WHERE f.is_active
 -- Feed 2: feed 1 plus the newest odds and the result, if we have one.
 -- Prices come out of the ladder JSONB with a LATERAL, so the read is one
 -- indexed lookup per selection rather than a join against every snapshot.
+-- Both LATERALs below guard the TYPE of the payload, not just the presence of
+-- the key. COALESCE catches a missing 'selections' but not a JSON null (jsonb
+-- 'null' is non-NULL to COALESCE), not an object and not a scalar — and the
+-- ::BIGINT cast throws on any non-numeric selection_id. There is no per-row
+-- isolation on the read side, so one malformed row made every SELECT against
+-- v_feed2 raise InvalidParameterValue / InvalidTextRepresentation and took
+-- BOTH feeds down for every reader.
 CREATE OR REPLACE VIEW v_feed2 AS
 SELECT v.*,
        oc.captured_at                                        AS odds_captured_at,
@@ -250,20 +257,28 @@ SELECT v.*,
 FROM v_feed1 v
 LEFT JOIN market_odds_current oc ON oc.market_id = v.market_id
 LEFT JOIN LATERAL (
-        SELECT x AS b FROM jsonb_array_elements(COALESCE(oc.ladder -> 'selections', '[]'::jsonb)) AS x
-        WHERE (x ->> 'selection_id')::BIGINT = v.selection_id
+        SELECT x AS b
+          FROM jsonb_array_elements(
+                   CASE WHEN jsonb_typeof(oc.ladder -> 'selections') = 'array'
+                        THEN oc.ladder -> 'selections'
+                        ELSE '[]'::jsonb END) AS x
+         WHERE (x ->> 'selection_id') ~ '^-?\d+$'
+           AND (x ->> 'selection_id')::BIGINT = v.selection_id
      ) bsel ON TRUE
 LEFT JOIN market_result mr ON mr.market_id = v.market_id
 LEFT JOIN LATERAL (
         SELECT x ->> 'status' AS status
-        FROM jsonb_array_elements(COALESCE(mr.runners, '[]'::jsonb)) AS x
-        WHERE (x ->> 'selection_id')::BIGINT = v.selection_id
+        FROM jsonb_array_elements(
+                   CASE WHEN jsonb_typeof(mr.runners) = 'array'
+                        THEN mr.runners
+                        ELSE '[]'::jsonb END) AS x
+         WHERE (x ->> 'selection_id') ~ '^-?\d+$'
+           AND (x ->> 'selection_id')::BIGINT = v.selection_id
      ) rsel ON TRUE
 LEFT JOIN event_score es ON es.fixture_id = v.fixture_id;
 
 -- The odds job's plan. A function rather than a view because the grace window
--- and horizon are configuration: markets that have started stay in scope for
--- the grace window so we capture their settlement, then drop out and retire.
+-- and horizon are configuration.
 --
 -- The grace window is the BACKSTOP, not the exit condition. A market leaves
 -- scope when Betfair says it is over — a terminal status — and the grace is

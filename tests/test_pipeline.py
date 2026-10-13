@@ -558,6 +558,43 @@ def test_a_finished_market_leaves_poll_scope_and_retires(db):
         "is_active"] is False
 
 
+def test_one_malformed_ladder_row_does_not_take_the_whole_feed_down(db):
+    """One bad row in a JSONB column used to take BOTH feeds down.
+
+    There is no per-row isolation on the read side, so a single malformed
+    market_odds_current.ladder made every SELECT against v_feed2 raise. The
+    COALESCE caught a MISSING 'selections' key; it does not catch a JSON null
+    (jsonb 'null' is non-NULL to COALESCE), an object or a scalar, and the
+    ::BIGINT cast throws on a non-numeric selection_id.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    db.execute("UPDATE market SET market_start_time = now() + interval '2 hours'")
+    db.commit()
+    run_job(db, run_odds, FakeBetting(books={
+        "1.100": open_book("1.100", [FakeRunnerBook(11, back=[(2.3, 100)])])}))
+
+    for shape in (
+        '{"selections": null}',
+        '{"selections": {"a": 1}}',
+        '"a scalar"',
+        '{"selections": [{"selection_id": "abc", "price": 2.3}]}',
+        '{"status": "OPEN"}',  # the shape that always worked
+    ):
+        db.execute(
+            "UPDATE market_odds_current SET ladder = %s::jsonb WHERE market_id = '1.100'",
+            (shape,),
+        )
+        db.commit()
+        doc = feed_document(db, priced=True, market_ids=["1.100"])
+        match = doc["events"][0]["markets"][0]
+        # The market is still served; its unreadable prices come back empty.
+        assert match["market_key"] == "1.100", shape
+        assert match["selections"][0]["price"] is None, shape
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):
