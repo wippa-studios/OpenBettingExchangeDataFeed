@@ -175,6 +175,42 @@ jobs:
       - name: Selection PK survives a re-migrate
         run: uv run betfeed migrate
 
+      # tests/test_pipeline.py — the suite that proves the two feeds are two
+      # different documents over ONE database — dropped and recreated the public
+      # schema on every test, so it gets its own database rather than the one
+      # the migrate checks above share.
+      - name: Create a throwaway database for the pipeline suite
+        run: |
+          uv run python -c "
+          from betfeed.config import load_config
+          from betfeed.db import connect
+          cfg = load_config()
+          with connect(cfg.database_url, autocommit=True) as c:
+              c.execute('DROP DATABASE IF EXISTS betfeed_test')
+              c.execute('CREATE DATABASE betfeed_test')
+          print('betfeed_test ready')
+          "
+      - name: Pipeline suite runs against the live database
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:pw@localhost:5432/betfeed_test
+        run: |
+          set -euo pipefail
+          # Guard 1: the wiring itself. A skip marker nobody sets is a silent
+          # hole in CI, not a safety valve — these tests were skipped in every
+          # job since they were written, and `64 passed` was read as coverage
+          # of a suite that never executed. Issue #10 shipped because of it.
+          uv run python -c "
+          import os, psycopg
+          c = psycopg.connect(os.environ['TEST_DATABASE_URL'], connect_timeout=5)
+          c.close()
+          print('TEST_DATABASE_URL reachable')
+          "
+          # Guard 2: the outcome. Every skip is a hole, so fail the job on any.
+          uv run pytest -q -rs 2>&1 | tee /tmp/pytest.log
+          if grep -qE '\b[0-9]+ skipped' /tmp/pytest.log; then
+            echo "::error::pytest skipped tests (reasons above) — a silently-skipped suite is not coverage"; exit 1
+          fi
+
   # Credentials must never be committed.
   guards:
     runs-on: ubuntu-latest
