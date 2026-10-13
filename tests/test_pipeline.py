@@ -638,6 +638,48 @@ def test_a_fixture_appears_once_even_when_its_open_date_is_null(db):
     assert len(keys) == len(set(keys))
 
 
+def test_a_resolved_market_is_not_resurrected_when_betfair_still_lists_it(db):
+    """Betfair keeps settled markets listed for a while.
+
+    `OR NOT market.is_active` treated "retired because it settled" exactly like
+    "retired because Betfair stopped listing it" and flipped it back to active,
+    so the market showed as active-and-resolved, could re-enter poll_scope, and
+    got a fresh retired_at — restarting the seven-day window in which its result
+    is readable.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    db.execute("UPDATE market SET market_start_time = now() - interval '10 minutes'")
+    db.commit()
+    run_job(db, run_odds, FakeBetting(books={
+        "1.100": settled_book("1.100", [FakeRunnerBook(11, status="WINNER"),
+                                        FakeRunnerBook(12, status="LOSER"),
+                                        FakeRunnerBook(13, status="LOSER")]),
+    }))
+    settled_at = db.execute(
+        "SELECT is_active, is_resolved, retired_at FROM market WHERE market_id='1.100'"
+    ).fetchone()
+    assert (settled_at["is_active"], settled_at["is_resolved"]) == (False, True)
+
+    # Betfair still lists it. The catalogue pass must not un-retire it.
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    after = db.execute(
+        "SELECT is_active, is_resolved, retired_at FROM market WHERE market_id='1.100'"
+    ).fetchone()
+    assert after["is_active"] is False, "a settled market was resurrected"
+    assert after["retired_at"] == settled_at["retired_at"], "retired_at was restarted"
+
+    # ...while a market retired because Betfair dropped it IS brought back.
+    db.execute("UPDATE market SET is_active = FALSE, retired_at = now() WHERE market_id = '1.101'")
+    db.commit()
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+    assert db.execute("SELECT is_active FROM market WHERE market_id='1.101'").fetchone()[
+        "is_active"] is True
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

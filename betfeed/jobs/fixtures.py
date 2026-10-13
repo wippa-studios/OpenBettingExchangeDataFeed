@@ -236,12 +236,21 @@ def _upsert_markets(conn, rows: list) -> int:
             venue             = EXCLUDED.venue,
             status            = EXCLUDED.status,
             total_matched     = EXCLUDED.total_matched,
-            is_active         = TRUE,
+            -- A market we hold a result for is never brought back. Betfair keeps
+            -- settled markets listed for a while, and `is_active = TRUE` treated
+            -- "retired because it settled" exactly like "retired because
+            -- Betfair stopped listing it": the market showed as active-and-
+            -- resolved, could re-enter poll_scope if it settled inside the
+            -- grace window, and got a fresh retired_at on re-retirement,
+            -- restarting the documented seven-day resolved window.
+            is_active         = CASE WHEN market.is_resolved THEN market.is_active ELSE TRUE END,
             last_seen_at      = now()
         WHERE market.market_name       IS DISTINCT FROM EXCLUDED.market_name
            OR market.market_start_time IS DISTINCT FROM EXCLUDED.market_start_time
            OR market.status            IS DISTINCT FROM EXCLUDED.status
-           OR NOT market.is_active
+           -- ...and the resurrection arm skips resolved markets outright, so a
+           -- settled market does not get a pointless rewrite on every pass.
+           OR (NOT market.is_active AND NOT market.is_resolved)
         """,
         rows,
     )
