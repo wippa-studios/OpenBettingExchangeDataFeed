@@ -212,9 +212,16 @@ def upsert_many(
     """Run one parameterised upsert per row.
 
     psycopg3 pipelines executemany, so a few thousand fixture/market rows per
-    run cost a handful of round trips, not one per row. ``dict`` values are
-    dumped as ``jsonb`` by psycopg3's default adapters, which is why the ladder
-    payloads below need no explicit wrapper.
+    run cost a handful of round trips, not one per row.
+
+    It does NOT adapt a Python ``dict`` for a ``%s`` placeholder: every JSONB
+    value must be wrapped in ``psycopg.types.json.Jsonb`` at the call site, or
+    executemany raises
+    ``ProgrammingError: cannot adapt type 'dict' using placeholder '%s'``.
+    ``winner_selection_ids`` is the exception in the other direction — a Python
+    ``list`` adapts to a Postgres array on its own. This docstring previously
+    claimed the opposite, which is what made the unwrapped ``event_score``
+    payload look correct.
     """
     if not rows:
         return 0

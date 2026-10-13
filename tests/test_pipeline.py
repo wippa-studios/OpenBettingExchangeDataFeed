@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -372,6 +373,88 @@ def test_a_voided_market_is_marked_voided(db):
     result = db.execute("SELECT voided, winner_selection_ids FROM market_result").fetchone()
     assert result["voided"] is True
     assert list(result["winner_selection_ids"]) == []
+
+
+# ── scores ────────────────────────────────────────────────────────────────
+
+def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):
+    """A betfairlightweight Score stand-in: `values` is the raw JSON dict."""
+    return SimpleNamespace(
+        event_id=event_id,
+        event_status="POST",
+        values={"home": {"team": home, "score": hs}, "away": {"team": away, "score": as_}},
+    )
+
+
+def test_a_score_is_stored_with_its_raw_values_payload(db):
+    """values_raw is JSONB, so a raw dict must be wrapped.
+
+    Unwrapped it raised
+      ProgrammingError: cannot adapt type 'dict' using placeholder '%s'
+    on the FIRST score of every run, which (before the guard was widened) took
+    the whole fixtures run down. Nothing wrote a score through
+    _capture_scores before this test.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    scores = FakeScores(available=["3001"], scores=[_score("3001")])
+
+    stats = run_job(db, run_fixtures, betting, scores=scores, SCORES_ENABLED="true")
+    assert stats["scores"] == 1
+
+    row = db.execute(
+        "SELECT home, away, home_score, away_score, values_raw FROM event_score"
+    ).fetchone()
+    assert (row["home"], row["away"]) == ("Test Utd", "Arsenal")
+    assert (row["home_score"], row["away_score"]) == ("2", "1")
+    # Stored as JSON, not as a repr, and not dropped.
+    assert row["values_raw"]["home"]["team"] == "Test Utd"
+
+
+def test_a_broken_scores_api_cannot_take_the_fixtures_run_down(db):
+    """The docstring's promise is 'settlement still works, only the 2-1 is
+    missing'. It used to hold only for an UNAUTHORISED key: the guard stopped
+    after the availability probe, so a failure in list_scores or in the upsert
+    propagated out of run_fixtures and killed the run."""
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+
+    class ExplodingScores(FakeScores):
+        def list_scores(self, update_keys=None, locale=None):
+            raise RuntimeError("scores exploded")
+
+    scores = ExplodingScores(available=["3001"], scores=[])
+    stats = run_job(db, run_fixtures, betting, scores=scores, SCORES_ENABLED="true")
+
+    assert stats["scores"] == 0
+    # ...and the fixtures collected before the scores step are all still there,
+    # because the whole run is one transaction that completed.
+    assert stats["markets"] == 2
+    assert db.execute("SELECT count(*) n FROM market").fetchone()["n"] == 2
+    assert db.execute("SELECT ok FROM feed_run WHERE job='fixtures' ORDER BY run_id DESC LIMIT 1"
+                      ).fetchone()["ok"] is True
+
+
+def test_a_score_for_an_event_we_never_collected_is_ignored(db):
+    """event_score.fixture_id REFERENCES fixture(fixture_id).
+
+    The Scores API lists POST events that listEvents need not still return.
+    Writing one we never collected is an FK violation, and inside the widened
+    guard that would cost us every OTHER score as well.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    scores = FakeScores(available=["3001", "9999"],
+                        scores=[_score("3001"), _score("9999")])
+
+    stats = run_job(db, run_fixtures, betting, scores=scores, SCORES_ENABLED="true")
+    assert stats["scores"] == 1
+    ids = [r["fixture_id"] for r in
+           db.execute("SELECT fixture_id FROM event_score").fetchall()]
+    assert ids == ["3001"]
 
 
 # ── plumbing ──────────────────────────────────────────────────────────────

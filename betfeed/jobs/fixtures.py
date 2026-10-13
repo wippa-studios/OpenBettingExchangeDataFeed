@@ -399,53 +399,78 @@ def _capture_scores(conn, client: BetfairClient, cfg: Config, stats: dict) -> No
 
     Requires a separately authorised key. Without one this is a no-op that logs
     why — settlement still works, only the 2-1 is missing.
+
+    The whole capture, not just the availability probe, is inside the guard. The
+    promise in this docstring used to hold only for an UNAUTHORISED key: the
+    guard stopped after ``scores_available()``, while ``list_scores`` and the
+    upsert ran outside it — so the failure that actually happens in production,
+    psycopg refusing a raw dict for a JSONB column, took the entire fixtures run
+    down.
     """
     try:
         if not client.scores_available():
             return
         finished = client.list_finished_event_ids(cfg.event_type_ids)
+        if not finished:
+            return
+        # event_score.fixture_id REFERENCES fixture(fixture_id), and the Scores
+        # API lists POST events that listEvents need not still return. Writing
+        # one we never collected is an FK violation, and inside this guard that
+        # would cost us every OTHER score too.
+        known = {
+            r["fixture_id"]
+            for r in conn.execute(
+                "SELECT fixture_id FROM fixture WHERE fixture_id = ANY(%s)", (list(finished),)
+            ).fetchall()
+        }
+
+        rows = []
+        for start in range(0, len(finished), 50):
+            for score in client.list_scores(finished[start : start + 50]):
+                values = getattr(score, "values", None)
+                parsed = score_from_betfair(values)
+                if parsed is None:
+                    continue
+                if score.event_id not in known:
+                    log.info("score for uncollected fixture %s ignored", score.event_id)
+                    continue
+                rows.append(
+                    (
+                        score.event_id,
+                        getattr(score, "event_status", None),
+                        parsed["home"],
+                        parsed["away"],
+                        parsed["home_score"],
+                        parsed["away_score"],
+                        # values_raw is JSONB and psycopg3 does NOT adapt a
+                        # Python dict on its own -- executemany raises
+                        #   ProgrammingError: cannot adapt type 'dict' using placeholder '%s'
+                        # on the first score of every run. Same reason as
+                        # market_result.runners above and the ladder payloads in
+                        # jobs/odds.py.
+                        Jsonb(values),
+                    )
+                )
+        if not rows:
+            return
+        upsert_many(
+            conn,
+            """
+            INSERT INTO event_score (fixture_id, event_status, home, away,
+                                     home_score, away_score, values_raw)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (fixture_id) DO UPDATE SET
+                event_status = EXCLUDED.event_status,
+                home         = EXCLUDED.home,
+                away         = EXCLUDED.away,
+                home_score   = EXCLUDED.home_score,
+                away_score   = EXCLUDED.away_score,
+                values_raw   = EXCLUDED.values_raw,
+                captured_at  = now()
+            """,
+            rows,
+        )
+        stats["scores"] += len(rows)
+        log.info("scores: captured %d event score(s)", len(rows))
     except Exception as e:
         log.info("scores capture skipped: %s", e)
-        return
-    if not finished:
-        return
-
-    rows = []
-    for start in range(0, len(finished), 50):
-        for score in client.list_scores(finished[start : start + 50]):
-            values = getattr(score, "values", None)
-            parsed = score_from_betfair(values)
-            if parsed is None:
-                continue
-            rows.append(
-                (
-                    score.event_id,
-                    getattr(score, "event_status", None),
-                    parsed["home"],
-                    parsed["away"],
-                    parsed["home_score"],
-                    parsed["away_score"],
-                    values,
-                )
-            )
-    if not rows:
-        return
-    upsert_many(
-        conn,
-        """
-        INSERT INTO event_score (fixture_id, event_status, home, away,
-                                 home_score, away_score, values_raw)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (fixture_id) DO UPDATE SET
-            event_status = EXCLUDED.event_status,
-            home         = EXCLUDED.home,
-            away         = EXCLUDED.away,
-            home_score   = EXCLUDED.home_score,
-            away_score   = EXCLUDED.away_score,
-            values_raw   = EXCLUDED.values_raw,
-            captured_at  = now()
-        """,
-        rows,
-    )
-    stats["scores"] += len(rows)
-    log.info("scores: captured %d event score(s)", len(rows))
