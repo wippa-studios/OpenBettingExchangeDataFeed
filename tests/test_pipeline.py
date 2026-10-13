@@ -480,6 +480,84 @@ def test_the_results_sweep_runs_before_retirement(db, monkeypatch):
     assert order[:2] == ["_sweep_results", "_retire_missing"]
 
 
+def test_a_match_forty_five_minutes_in_is_still_polled_and_still_visible(db):
+    """Kickoff is not the end of the event.
+
+    The default sports are EVENT_TYPE_IDS=1,8 — soccer and tennis — and a
+    soccer match runs about two hours after kickoff. A clock-only scope dropped
+    the market out of poll_scope 30 minutes after start time, then
+    _retire_finished set is_active=FALSE, is_resolved=FALSE, which satisfies
+    NEITHER branch of v_feed1's predicate: the live match left both feeds
+    entirely — not stale, gone — for up to twelve hours, and could not settle
+    in the meantime.
+    """
+    live = FakeEvent("3001", "Test Utd v Arsenal")
+    soon = FakeEvent("3002", "Chelsea v City")
+    markets = {
+        "1.100": FakeCatalogueMarket(
+            "1.100", live, "MATCH_ODDS",
+            runners=[FakeRunnerCatalogue(11, "Test Utd", 1),
+                     FakeRunnerCatalogue(12, "Draw", 2)],
+            start=NOW - timedelta(minutes=45),
+        ),
+        "1.200": FakeCatalogueMarket(
+            "1.200", soon, "MATCH_ODDS",
+            runners=[FakeRunnerCatalogue(31, "Chelsea", 1),
+                     FakeRunnerCatalogue(32, "City", 2)],
+            start=NOW + timedelta(hours=2),
+        ),
+    }
+    betting = FakeBetting(
+        events={"1": [FakeEventResult(live), FakeEventResult(soon)]},
+        catalogue={"3001": [markets["1.100"]], "3002": [markets["1.200"]]},
+    )
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    # In scope alongside the upcoming match, though it started 45 minutes ago.
+    scope = db.execute("SELECT market_id FROM poll_scope(%s, %s)", (30, 168)).fetchall()
+    assert {r["market_id"] for r in scope} == {"1.100", "1.200"}
+
+    # One healthy odds cycle. The live match is read...
+    run_job(db, run_odds, FakeBetting(books={
+        "1.100": FakeMarketBook("1.100", [FakeRunnerBook(11, status="ACTIVE")],
+                                status="OPEN", inplay=True, publish_time=NOW),
+    }))
+    assert db.execute(
+        "SELECT count(*) n FROM market_odds_current WHERE market_id='1.100'"
+    ).fetchone()["n"] == 1
+
+    # ...and it must survive the cycle: still active, still in both feeds.
+    assert db.execute("SELECT is_active FROM market WHERE market_id='1.100'").fetchone()[
+        "is_active"] is True
+    doc = feed_document(db, priced=True, limit=10)
+    keys = {m["market_key"] for e in doc["events"] for m in e["markets"]}
+    assert "1.100" in keys and "1.200" in keys
+    live_match = next(m for e in doc["events"] for m in e["markets"] if m["market_key"] == "1.100")
+    assert live_match["in_play"] is True
+
+
+def test_a_finished_market_leaves_poll_scope_and_retires(db):
+    """The other half: status, not the clock, is what ends the poll.
+
+    A terminal status past the grace window takes the market out of scope and
+    retires it, so an abandoned market still stops being polled.
+    """
+    fixture, markets = soccer_world(start=NOW - timedelta(hours=3))
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    # Betfair says it is over but we hold no result.
+    db.execute("UPDATE market SET status = 'CLOSED_EVENT' WHERE market_id = '1.100'")
+    db.commit()
+    scope = db.execute("SELECT market_id FROM poll_scope(%s, %s)", (30, 168)).fetchall()
+    assert "1.100" not in {r["market_id"] for r in scope}
+
+    run_job(db, run_odds, FakeBetting(books={}))
+    assert db.execute("SELECT is_active FROM market WHERE market_id='1.100'").fetchone()[
+        "is_active"] is False
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

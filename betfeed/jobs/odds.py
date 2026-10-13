@@ -1,9 +1,13 @@
 """FEED 2 — feed 1's markets plus live odds, every 5 minutes.
 
 The scope comes from feed 1: this job never decides what to poll, it asks
-``poll_scope()`` which returns the active markets whose start time falls inside
-the horizon, plus a grace window behind the start time so a market that settles
-between two polls still gets its result captured.
+``poll_scope()``, which returns the active markets whose start time falls
+inside the horizon, plus every market that has started and that Betfair does
+not yet call finished. That second clause is the point — a market leaves scope
+on its own STATUS, not on the clock, because kickoff is not the end of the
+event: the default sports are soccer and tennis and a soccer match runs about
+two hours. ``SETTLE_GRACE_MINUTES`` is the minimum wait before a terminal
+status is acted on, not the thing that decides.
 
 Per poll it writes three things:
 
@@ -30,7 +34,7 @@ from psycopg.types.json import Jsonb
 from ..betfair import BetfairClient
 from ..config import Config
 from ..db import LOCK_ODDS, JobRun, advisory_lock, ensure_partitions, upsert_many
-from ..normalize import ladder_payload, normalise_book, result_from_book
+from ..normalize import TERMINAL_STATUSES, ladder_payload, normalise_book, result_from_book
 from .fixtures import write_result
 
 log = logging.getLogger("betfeed.jobs.odds")
@@ -55,6 +59,13 @@ def _poll(conn, client: BetfairClient, cfg: Config, stats: dict) -> None:
     ).fetchall()
     market_ids = [r["market_id"] for r in scope]
     fixture_of = {r["market_id"]: r["fixture_id"] for r in scope}
+
+    # Retirement runs before the "nothing in scope" return. It used to run at
+    # the very end of _poll, behind that guard, so it only ever fired on a cycle
+    # that had read at least one book — leaving a market that had dropped out of
+    # scope active but never polled: still in both feeds, with stale prices and
+    # nothing to say anything was wrong.
+    _retire_finished(conn, cfg.settle_grace_minutes)
 
     if not market_ids:
         log.info("nothing in scope (no fixture has run yet, or everything has settled)")
@@ -168,7 +179,6 @@ def _poll(conn, client: BetfairClient, cfg: Config, stats: dict) -> None:
     stats["snapshots"] += _write_snapshots(conn, snapshots)
     stats["markets"] += _write_current(conn, current)
     _update_market_status(conn, market_status_rows)
-    _retire_finished(conn, cfg.settle_grace_minutes)
 
     log.info(
         "captured %d snapshot(s), %d result(s)", stats["snapshots"], stats["results"]
@@ -225,11 +235,22 @@ def _update_market_status(conn, rows: list) -> None:
 
 
 def _retire_finished(conn, grace_minutes: int) -> int:
-    """Markets past their grace window with no result: stop polling them.
+    """Retire markets Betfair has finished and we still hold no result for.
 
-    A market that finished without ever reporting a winner (abandoned, voided at
-    the exchange, or one we simply lost the race to) would otherwise be polled
-    forever, because it never leaves poll_scope() on its own.
+    Requires EVIDENCE that the event is over — a terminal market status — rather
+    than inferring it from elapsed time. Kickoff is not the end of the event: the
+    default sports are soccer (id 1) and tennis (id 8), and a soccer match runs
+    about two hours, so thirty minutes after start time is a match in progress.
+
+    Retiring one of those set is_active=FALSE, is_resolved=FALSE, which
+    satisfies NEITHER branch of v_feed1's predicate — so a live match left both
+    feeds entirely, not stale but gone, until the next fixtures run resurrected
+    it (up to twelve hours later) and could not settle in the meantime.
+
+    The grace period is the minimum wait before we act on a terminal status, not
+    the thing that decides. A market Betfair stops returning at all is bounded
+    instead by the fixtures job's STALE_AFTER_HOURS, which retires what Betfair
+    stopped listing.
     """
     rows = conn.execute(
         """
@@ -238,9 +259,10 @@ def _retire_finished(conn, grace_minutes: int) -> int:
          WHERE is_active
            AND is_resolved = FALSE
            AND market_start_time < now() - make_interval(mins => %s)
+           AND upper(coalesce(status, '')) = ANY(%s)
         RETURNING market_id
         """,
-        (grace_minutes,),
+        (grace_minutes, sorted(TERMINAL_STATUSES)),
     ).fetchall()
     if rows:
         ids = [r["market_id"] for r in rows]

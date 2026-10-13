@@ -300,7 +300,7 @@ application supply credentials without writing a file at all.
 | `FIXTURES_INTERVAL_MINUTES` | `720` | Feed 1 cadence. **See the note below — 720 leaves results up to 12 h stale.** |
 | `ODDS_INTERVAL_MINUTES` | `5` | Feed 2 cadence. |
 | `ODDS_HORIZON_HOURS` | `168` | How far ahead odds are polled. |
-| `SETTLE_GRACE_MINUTES` | `30` | How long a finished market is left unresolved. |
+| `SETTLE_GRACE_MINUTES` | `30` | Minimum wait after a market reports a **terminal status** before it is retired. Not a match length — a started market keeps being polled until Betfair says it is over. |
 | `BOOK_CHUNK_SIZE` | `40` | Markets per `listMarketBook`. **Delay-key limit.** |
 | `CATALOGUE_CHUNK_EVENTS` | `100` | Events per `listMarketCatalogue`. |
 | `CATALOGUE_MAX_RESULTS` | `200` | Markets per catalogue response. **Delay-key limit.** |
@@ -420,6 +420,15 @@ Three layers, because they have different reliability:
 1. **From the book — free.** Any market book whose status is terminal, or which
    has assigned a `WINNER`, gives the outcome with no extra API call. This is the
    normal path and it is why feed 2 settles faster than feed 1.
+
+   Feed 2 is also what keeps a market in scope. A market leaves `poll_scope()`
+   when Betfair reports a terminal status (`CLOSED`, `CLOSED_EVENT`, `SETTLED`,
+   `VOIDED`), not when a clock says it has been running long enough — the
+   default sports are soccer and tennis and a soccer match runs about two hours
+   after kickoff. `SETTLE_GRACE_MINUTES` is the minimum wait before a terminal
+   status is acted on, not a match length. A retired-but-unresolved market
+   satisfies neither branch of `v_feed1`, so retiring a match that is still
+   being played would remove it from both feeds entirely.
 2. **Sweep.** The fixtures job re-checks markets that finished while nothing was
    watching, over `RESULTS_BACKFILL_HOURS`.
 3. **Scores**, where the app key is authorised for the Scores API.

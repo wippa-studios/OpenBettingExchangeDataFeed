@@ -52,9 +52,17 @@ DEFAULTS: dict[str, str] = {
     # The two cadences. 720m = the 12h feed-1 refresh, 5m = the feed-2 refresh.
     "FIXTURES_INTERVAL_MINUTES": "720",
     "ODDS_INTERVAL_MINUTES": "5",
-    # Feed 2 stops polling markets that have started; this is the window after
-    # start in which we still poll to capture the settle.
+    # Feed 2 stops polling markets Betfair reports as finished; this is how far
+    # ahead an UNSTARTED market stays in scope.
     "ODDS_HORIZON_HOURS": "168",
+    # NOT a match length. A market that has started stays in poll_scope until
+    # Betfair reports a terminal status (CLOSED / CLOSED_EVENT / SETTLED /
+    # VOIDED); this is the minimum wait after that status before we retire the
+    # market. Thirty minutes is not "how long a soccer match lasts" — the
+    # default sports are soccer (1) and tennis (8), and a soccer match runs
+    # about two hours after kickoff. Retiring a market that is still being
+    # played sets is_active=FALSE, is_resolved=FALSE, which satisfies NEITHER
+    # branch of v_feed1 and removes it from both feeds entirely.
     "SETTLE_GRACE_MINUTES": "30",
     # Betfair caps market data at 200 weight points per request and 100 event ids
     # per catalogue filter. These are the chunk sizes we aim for; on

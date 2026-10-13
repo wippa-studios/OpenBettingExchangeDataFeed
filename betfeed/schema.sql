@@ -264,6 +264,13 @@ LEFT JOIN event_score es ON es.fixture_id = v.fixture_id;
 -- The odds job's plan. A function rather than a view because the grace window
 -- and horizon are configuration: markets that have started stay in scope for
 -- the grace window so we capture their settlement, then drop out and retire.
+--
+-- The grace window is the BACKSTOP, not the exit condition. A market leaves
+-- scope when Betfair says it is over — a terminal status — and the grace is
+-- the minimum wait before we act on that. Deciding on the clock alone meant
+-- feed 2 stopped collecting in-play prices 30 minutes after kickoff (the
+-- default sports are soccer and tennis, and a soccer match runs about two
+-- hours), and the odds job could then never observe the settlement.
 CREATE OR REPLACE FUNCTION poll_scope(grace_minutes INT, horizon_hours INT)
 RETURNS TABLE (
     market_id         TEXT,
@@ -278,8 +285,15 @@ RETURNS TABLE (
     FROM market m
     WHERE m.is_active
       AND m.market_start_time IS NOT NULL
-      AND m.market_start_time >  now() - make_interval(mins => grace_minutes)
       AND m.market_start_time <  now() + make_interval(hours => horizon_hours)
+      AND (
+            -- not started, or started within the grace window
+            m.market_start_time > now() - make_interval(mins => grace_minutes)
+         OR -- started and still running: in scope until Betfair calls it
+            (m.market_start_time <= now()
+             AND upper(coalesce(m.status, ''))
+                 <> ALL (ARRAY['CLOSED', 'CLOSED_EVENT', 'SETTLED', 'VOIDED']))
+      )
     ORDER BY m.market_start_time
 $$ LANGUAGE sql STABLE;
 
