@@ -127,6 +127,28 @@ def test_structural_errors_name_the_path():
         })])
 
 
+def test_a_start_time_that_is_a_datetime_is_accepted():
+    """A TIMESTAMPTZ column arrives as a datetime, not an ISO string.
+
+    The build path in feeds.py puts the raw column value in starts_at and
+    relies on the contract to normalise it. When the contract insisted on a
+    `str`, EVERY document built from a real database raised on its first event
+    and was served as an empty, stale:true feed — the check tested the type
+    rather than presence, so present and missing failed identically.
+    """
+    doc = make_feed([_event(starts_at=datetime(2026, 10, 13, 14, 0, tzinfo=timezone.utc))])
+    assert doc["events"][0]["starts_at"] == "2026-10-13T14:00:00+00:00"
+
+
+def test_a_missing_start_time_is_still_refused():
+    """The other half of the same gate: absent is absent, not a datetime."""
+    for missing in (None, "", "   "):
+        with pytest.raises(ContractError, match=r"events\[0\].starts_at is required"):
+            make_feed([_event(starts_at=missing)])
+    with pytest.raises(ContractError, match=r"events\[0\].starts_at is required"):
+        make_feed([{k: v for k, v in _event().items() if k != "starts_at"}])
+
+
 def test_a_market_with_no_selections_is_refused():
     """Half a market is worse than no market."""
     with pytest.raises(ContractError, match="at least one selection"):

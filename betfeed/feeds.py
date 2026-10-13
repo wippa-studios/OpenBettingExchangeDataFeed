@@ -223,7 +223,12 @@ def _result(row: dict) -> dict | None:
     return {
         "status": row.get("result_status"),
         "voided": bool(row.get("result_voided")),
-        "winners": list(row.get("winner_selection_ids") or []),
+        # winner_selection_ids is BIGINT[], so psycopg hands back Python ints.
+        # Every other identifier in the document is a string — contract.py emits
+        # `selection_key` as str() — so a consumer joining result.winners to
+        # selection.selection_key got no matches. The column stays a BIGINT[];
+        # only the wire type is normalised here.
+        "winners": [str(w) for w in (row.get("winner_selection_ids") or [])],
         "observed_at": row.get("result_observed_at"),
         "settled_at": row.get("result_settled_at"),
     }

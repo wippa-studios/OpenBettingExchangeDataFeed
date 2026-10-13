@@ -66,6 +66,22 @@ def _non_empty_str(value: Any) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
 
+def _present(value: Any) -> bool:
+    """Is there a value here at all — whatever its type?
+
+    ``starts_at`` reaches the validator as whatever psycopg returned for a
+    TIMESTAMPTZ column, which is a ``datetime``, and is normalised by
+    :func:`_iso` on the way out. Testing it with ``_non_empty_str`` asked for a
+    type the build path never produces, so a *present* start time and a *missing*
+    one raised the identical error and there was no input that passed.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    return _iso(value) not in (None, "")
+
+
 def _identifier(value: Any) -> str | None:
     """Coerce an id to a string, or None if it is not an id at all.
 
@@ -153,7 +169,7 @@ def validate_feed(doc: dict) -> dict:
             raise ContractError(f"{at}.event_key is required")
         if not _non_empty_str(e.get("name")):
             raise ContractError(f"{at}.name is required")
-        if not _non_empty_str(e.get("starts_at")):
+        if not _present(e.get("starts_at")):
             raise ContractError(f"{at}.starts_at is required")
 
         markets: list[dict] = []

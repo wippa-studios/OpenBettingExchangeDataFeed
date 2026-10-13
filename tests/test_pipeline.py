@@ -288,10 +288,20 @@ def test_a_settled_book_becomes_a_result_and_retires_the_market(db):
     assert market["is_resolved"] is True
     assert market["is_active"] is False  # out of poll scope for good
 
-    # The finished market drops out of the live feed but its result is askable.
-    live = feed_document(db, priced=True, include_finished=True, limit=10)
-    match = next((m for e in live["events"] for m in e["markets"] if m["market_key"] == "1.100"), None)
-    assert match is None  # selection retired with the market
+    scope = db.execute("SELECT market_id FROM poll_scope(%s, %s)", (30, 168)).fetchall()
+    assert "1.100" not in {r["market_id"] for r in scope}
+
+    # It is out of poll scope, but it is still readable and its result is
+    # attached: v_feed1 publishes a resolved market for seven days after it
+    # settles (commit 8d8544f, "resolved markets were invisible"), because the
+    # result is the whole reason to keep it.
+    #
+    # This used to assert `match is None`. It passed only because every document
+    # came back empty (#10) — a third assertion in this file that could not fail.
+    doc = feed_document(db, priced=True, include_finished=True, limit=10)
+    match = next(m for e in doc["events"] for m in e["markets"] if m["market_key"] == "1.100")
+    assert match["result"]["status"] == "CLOSED_EVENT"
+    assert match["result"]["winners"] == ["11"]
 
 
 def test_results_are_readable_while_the_market_is_still_active(db):
