@@ -103,19 +103,7 @@ def _cmd_validate(cfg) -> int:
     )
 
     print("database")
-    def _db():
-        with connect(cfg.database_url) as conn:
-            n = conn.execute("SELECT count(*) AS n FROM fixture").fetchone()["n"]
-            have = conn.execute(
-                "SELECT count(*) AS n FROM pg_tables WHERE schemaname='public'"
-            ).fetchone()["n"]
-            if have < 8:
-                raise RuntimeError(
-                    f"schema not applied ({have} tables) — run `betfeed migrate`"
-                )
-            return f"{have} tables, {n} fixtures"
-
-    check("connect and read", _db)
+    check("connect and read", lambda: _check_database(cfg.database_url))
 
     print("betfair")
     def _login():
@@ -133,6 +121,24 @@ def _cmd_validate(cfg) -> int:
         return 0
     print("not ready — fix the FAIL lines above")
     return 1
+
+
+def _check_database(database_url: str) -> str:
+    """Connect, prove the schema is applied, count what is in it.
+
+    Counts the TABLES before the fixture rows. The other order raised
+    UndefinedTable on an unmigrated database, so the "run `betfeed migrate`"
+    message written for exactly that situation was unreachable — the one error
+    a new user hits first could never be the one we prepared for.
+    """
+    with connect(database_url) as conn:
+        have = conn.execute(
+            "SELECT count(*) AS n FROM pg_tables WHERE schemaname='public'"
+        ).fetchone()["n"]
+        if have < 8:
+            raise RuntimeError(f"schema not applied ({have} tables) — run `betfeed migrate`")
+        n = conn.execute("SELECT count(*) AS n FROM fixture").fetchone()["n"]
+        return f"{have} tables, {n} fixtures"
 
 
 def _fail(message):

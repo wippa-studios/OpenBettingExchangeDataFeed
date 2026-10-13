@@ -27,6 +27,11 @@ log = logging.getLogger("betfeed.feeds")
 # level. Per-market age is always reported regardless.
 DEFAULT_STALE_AFTER_SECONDS = 900  # 15 min = 3 missed 5-minute polls
 
+# The most markets one document may carry. The CLI's --n and both MCP feed
+# tools take an unbounded integer from the caller; this is the ceiling they all
+# resolve to.
+MAX_MARKETS_PER_DOCUMENT = 1000
+
 
 def feed_document(
     conn: psycopg.Connection,
@@ -47,7 +52,16 @@ def feed_document(
     ``limit`` counts **markets**, not rows. Paging on selection rows would cut a
     market in half, and a half-market is a worse answer than a shorter page:
     the contract guarantees a market has all of its runners or none.
+
+    ``limit`` and ``offset`` are clamped here rather than at each call site,
+    so the CLI and both MCP tools inherit the bound. Unclamped, a negative
+    limit raised InvalidRowCountInLimitClause from psycopg (a stack trace from
+    a tool call) and 10**9 asked Postgres for every row of v_feed2 — including
+    both LATERALs — and shipped the result over stdio.
     """
+    limit = max(1, min(int(limit), MAX_MARKETS_PER_DOCUMENT))
+    offset = max(0, int(offset))
+
     view = "v_feed2" if priced else "v_feed1"
     where, params = _filters(
         sport=sport,

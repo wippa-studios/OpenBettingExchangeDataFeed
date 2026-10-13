@@ -760,6 +760,49 @@ def test_failure_counters_are_per_run_not_cumulative(db):
     )
 
 
+def test_validate_says_run_migrate_on_an_unmigrated_database(db):
+    """The one error a new user hits first.
+
+    `_cmd_validate` counted fixture rows BEFORE checking pg_tables, so on an
+    unmigrated database psycopg raised UndefinedTable and the friendly message
+    written for exactly that situation never appeared.
+    """
+    from betfeed.cli import _check_database
+
+    assert _check_database(TEST_URL).endswith("fixtures")  # migrated: works
+
+    db.execute("DROP SCHEMA public CASCADE")
+    db.execute("CREATE SCHEMA public")
+    db.commit()
+    try:
+        with pytest.raises(RuntimeError, match="run `betfeed migrate`"):
+            _check_database(TEST_URL)
+    finally:
+        migrate(db)
+
+
+def test_limit_and_offset_are_clamped(db):
+    """--n and both MCP feed tools take an unbounded integer from the caller.
+
+    A negative limit raised InvalidRowCountInLimitClause out of psycopg (a
+    stack trace from a tool call) and 10**9 asked Postgres for every row of
+    v_feed2 including both LATERALs, then shipped it over stdio.
+    """
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    assert feed_document(db, priced=False, limit=-1)["events"]  # no crash
+    assert feed_document(db, priced=False, limit=0)["events"]   # no empty doc
+    assert feed_document(db, priced=False, offset=-50)["events"]
+    huge = feed_document(db, priced=False, limit=10**9)
+    assert len(huge["events"]) == 1
+
+    from betfeed.feeds import MAX_MARKETS_PER_DOCUMENT
+    assert MAX_MARKETS_PER_DOCUMENT == 1000
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

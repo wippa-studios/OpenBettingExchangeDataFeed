@@ -128,6 +128,17 @@ def test_overround_and_probability():
     # A 2.0/2.0 book quoted at 1.95/1.95 has margin.
     assert overround([1.95, 1.95]) > 0
 
+
+def test_a_value_that_is_not_a_price_is_not_a_probability():
+    """`1/p` raised ZeroDivisionError at 0 and returned a NEGATIVE probability
+    for a negative price — a plausible-looking number that is nonsense, and
+    worse than a crash because nothing downstream flags it."""
+    for bad in (0.0, -1.0, -2.5, 1.0, 0.5, None, "abc"):
+        assert implied_prob(bad) is None, bad
+    assert implied_prob(2.0) == 0.5  # unchanged for real prices
+    assert overround([2.0, -1.0]) is None
+    assert overround([]) == -1.0  # no prices: still an answer, not a crash
+
 # ── one bad market must not cost the rest of the batch ────────────────────────
 #
 # The odds job iterates a poll scope of ~240 markets in ONE loop, and

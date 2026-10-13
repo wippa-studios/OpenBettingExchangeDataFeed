@@ -144,9 +144,38 @@ def valid_tick(p: float) -> bool:
     return bool(band) and (c - band[0]) % band[2] == 0
 
 
-def implied_prob(p: float) -> float:
-    return 1 / p
+def implied_prob(p: float) -> float | None:
+    """Raw decimal-odds price -> implied probability, or None if it is not one.
+
+    A price is only a probability if it is greater than 1. `1/p` on its own
+    raised ZeroDivisionError at zero and cheerfully returned a NEGATIVE
+    probability for a negative price — a plausible-looking number that is
+    nonsense, and worse than a crash because nothing downstream flags it.
+
+    Prices below 1 cannot reach the database (valid_tick rejects them at the
+    boundary), but these helpers are public: the MCP server and any consumer
+    importing betfeed.odds call them directly, on book-derived input.
+    """
+    try:
+        value = float(p)
+    except (TypeError, ValueError):
+        return None
+    if value <= 1:
+        return None
+    return 1 / value
 
 
-def overround(prices) -> float:
-    return sum(1 / p for p in prices) - 1
+def overround(prices) -> float | None:
+    """Sum of implied probabilities minus 1, or None if any price is not one.
+
+    Betting markets are overround (sum of implied probabilities > 1). A price
+    at or below 1 is not a decimal-odds price, so this refuses rather than
+    returning a number built from nonsense.
+    """
+    total = 0.0
+    for p in prices:
+        q = implied_prob(p)
+        if q is None:
+            return None
+        total += q
+    return total - 1
