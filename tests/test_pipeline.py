@@ -595,6 +595,49 @@ def test_one_malformed_ladder_row_does_not_take_the_whole_feed_down(db):
         assert match["selections"][0]["price"] is None, shape
 
 
+def test_a_fixture_appears_once_even_when_its_open_date_is_null(db):
+    """open_date is NULL for catalogue events the events call did not return.
+
+    The read side orders rows and starts a new event on every fixture change,
+    so an ordering that interleaves two fixtures' markets emits each of them
+    twice under the same event_key. The old ORDER BY led with
+    COALESCE(open_date, market_start_time), so exactly those fixtures —
+    interleaved by start time — came out twice.
+    """
+    a = FakeEvent("3001", "Test Utd v Arsenal", open_date=NOW)
+    b = FakeEvent("3002", "Chelsea v City", open_date=NOW)
+    # 3001 owns markets at +1h and +3h, 3002 one at +2h. Ordering by start time
+    # therefore visits 3001, 3002, 3001 — the interleaving that split one
+    # fixture into two events under the same event_key.
+    markets = {
+        "1.100": FakeCatalogueMarket("1.100", a, "MATCH_ODDS",
+                                     runners=[FakeRunnerCatalogue(11, "Test Utd", 1),
+                                              FakeRunnerCatalogue(12, "Draw", 2)],
+                                     start=NOW + timedelta(hours=1)),
+        "1.101": FakeCatalogueMarket("1.101", a, "OVER_UNDER_25", market_name="Goals",
+                                     runners=[FakeRunnerCatalogue(21, "Under", 1),
+                                              FakeRunnerCatalogue(22, "Over", 2)],
+                                     start=NOW + timedelta(hours=3)),
+        "1.200": FakeCatalogueMarket("1.200", b, "MATCH_ODDS",
+                                     runners=[FakeRunnerCatalogue(31, "Chelsea", 1),
+                                              FakeRunnerCatalogue(32, "City", 2)],
+                                     start=NOW + timedelta(hours=2)),
+    }
+    betting = FakeBetting(
+        events={"1": [FakeEventResult(a), FakeEventResult(b)]},
+        catalogue={"3001": [markets["1.100"], markets["1.101"]], "3002": [markets["1.200"]]},
+    )
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
+
+    db.execute("UPDATE fixture SET open_date = NULL")
+    db.commit()
+
+    doc = feed_document(db, priced=False, limit=10)
+    keys = [e["event_key"] for e in doc["events"]]
+    assert sorted(keys) == ["3001", "3002"], f"one fixture emitted twice: {keys}"
+    assert len(keys) == len(set(keys))
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

@@ -149,6 +149,15 @@ def test_a_missing_start_time_is_still_refused():
         make_feed([{k: v for k, v in _event().items() if k != "starts_at"}])
 
 
+def test_one_event_key_appears_once_per_document():
+    """The read side groups rows into events by "same fixture as the previous
+    row?", so an ordering that interleaves two fixtures emits each of them
+    twice. The consumer cannot do anything sensible with that, so it is
+    refused rather than shipped."""
+    with pytest.raises(ContractError, match=r"event_key '999' is already in this document"):
+        make_feed([_event(), _event()])
+
+
 def test_a_market_with_no_selections_is_refused():
     """Half a market is worse than no market."""
     with pytest.raises(ContractError, match="at least one selection"):

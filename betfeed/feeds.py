@@ -74,14 +74,18 @@ def feed_document(
 
     ids = [r["market_id"] for r in chosen]
 
-    # Step 2: every row of those markets. Ordering groups a fixture's markets
-    # together even when they have different start times (horse racing), which
-    # is what keeps one event from being emitted twice.
+    # Step 2: every row of those markets. fixture_id leads the ORDER BY: the
+    # grouping invariant below is "same fixture as the previous row?", so any
+    # ordering that interleaves two fixtures' markets emits one event twice.
+    # open_date was the leading key and is NULL for catalogue events the events
+    # call did not return — exactly what a truncated or racing response yields —
+    # at which point ordering fell through to market_start_time and interleaved.
     rows = conn.execute(
         f"""
         SELECT * FROM {view}
          WHERE market_id = ANY(%s)
-         ORDER BY COALESCE(open_date, market_start_time) NULLS LAST,
+         ORDER BY fixture_id,
+                  COALESCE(open_date, market_start_time) NULLS LAST,
                   market_start_time NULLS LAST,
                   market_id, sort_priority NULLS LAST, selection_id
         """,

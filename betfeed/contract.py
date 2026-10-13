@@ -160,6 +160,7 @@ def validate_feed(doc: dict) -> dict:
 
     events: list[dict] = []
     priced_any = False
+    seen_events: set[str] = set()
 
     for i, e in enumerate(raw_events):
         at = f"events[{i}]"
@@ -167,6 +168,14 @@ def validate_feed(doc: dict) -> dict:
             raise ContractError(f"{at} must be an object")
         if _identifier(e.get("event_key")) is None:
             raise ContractError(f"{at}.event_key is required")
+        key = str(_identifier(e["event_key"]))
+        if key in seen_events:
+            # Two documents' worth of markets under one event_key is what a
+            # consumer cannot do anything sensible with, and it is produced by
+            # a read-side ordering bug rather than by bad data — so it is
+            # refused here rather than shipped.
+            raise ContractError(f"{at}.event_key {key!r} is already in this document")
+        seen_events.add(key)
         if not _non_empty_str(e.get("name")):
             raise ContractError(f"{at}.name is required")
         if not _present(e.get("starts_at")):
