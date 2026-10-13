@@ -17,6 +17,42 @@
 
 set -euo pipefail
 
+# A reused password comes out of an existing DATABASE_URL still percent-encoded,
+# and has to go back in percent-encoded (for the URL) and decoded (for SQL).
+# Generated passwords are alnum-only, so this only matters on the reuse path —
+# but that is the path the script's own documentation tells people to take.
+#
+# Unreserved per RFC 3986: alphanumerics plus - . _ ~
+urlencode() {
+    local s="$1" out="" i c
+    for (( i = 0; i < ${#s}; i++ )); do
+        c="${s:i:1}"
+        case "$c" in
+            [a-zA-Z0-9._~-]) out+="$c" ;;
+            # Escape EVERY byte, not just the first: od prints one hex byte per
+            # byte, so a multi-byte character is two bytes and needs two %XX.
+            *) out+="$(printf '%s' "$c" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g')" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+urldecode() {
+    local rest="$1" out="" chunk
+    while [[ "$rest" == *%* ]]; do
+        chunk="${rest:0:3}"
+        if [[ "$chunk" =~ ^%[0-9A-Fa-f][0-9A-Fa-f]$ ]]; then
+            out+="$(printf "\\x${chunk:1}")"
+            rest="${rest:3}"
+        else
+            # Not a valid escape — keep the character rather than eat it.
+            out+="${chunk:0:1}"
+            rest="${rest:1}"
+        fi
+    done
+    printf '%s' "$out$rest"
+}
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$PROJECT_DIR/.env"
 DB_NAME="${DB_NAME:-betfeed}"
@@ -56,13 +92,19 @@ REUSE_PASSWORD=0
 if [[ -f "$ENV_FILE" ]]; then
     EXISTING="$(grep -E '^DATABASE_URL=' "$ENV_FILE" || true)"
     if [[ -n "$EXISTING" ]]; then
-        DB_PASSWORD="$(printf '%s' "$EXISTING" | sed -E 's|.*://[^:]+:([^@]*)@.*|\1|')"
+        # The password is whatever sits between the first ':' and the '@' that
+        # ends the authority, still percent-encoded exactly as the URL had it.
+        ENCODED="$(printf '%s' "${EXISTING#DATABASE_URL=}" \
+            | sed -E 's|^[a-zA-Z0-9+.-]+://[^:/?#]*:([^@]*)@.*$|\1|')"
+        DB_PASSWORD="$(urldecode "$ENCODED")"
         REUSE_PASSWORD=1
         echo "==> Reusing the password already in .env"
     fi
 fi
 
-ROLE_EXISTS="$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" || true)"
+ROLE_EXISTS="$(sudo -u postgres psql -tAc \
+    -v db_user="$DB_USER" \
+    "SELECT 1 FROM pg_roles WHERE rolname = :'db_user'" || true)"
 # Only reset a password we do not already have a copy of, otherwise a re-run
 # would silently break a working .env.
 ALTER_PASSWORD=0
@@ -71,33 +113,61 @@ if [[ "$REUSE_PASSWORD" -eq 0 && "$ROLE_EXISTS" == "1" ]]; then
 fi
 
 echo "==> Creating role and database"
+# Every value reaches Postgres as DATA, never as string interpolation.
+#
+#   CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}';
+#
+# was plain interpolation inside SQL running as the postgres superuser, and a
+# password is HAND-CHOSEN on the documented rotation path (delete the role, keep
+# .env): an apostrophe was a syntax error at best, crafted content was statement
+# injection as superuser.
+#
+# Two layers matter, and both were needed:
+#   1. format() with %I/%L inside the DO block — but on its own that is NOT
+#      enough, because the password was still pasted into the SQL TEXT as a
+#      string literal, so a quote broke it just the same.
+#   2. psql variables (:'var') — but those are not substituted inside a
+#      dollar-quoted body, which is exactly where they were needed.
+#
+# So: psql variables set session GUCs, and the DO block reads them back with
+# current_setting(). Nothing operator-supplied is ever part of the SQL text.
 sudo -u postgres psql -v ON_ERROR_STOP=1 \
-    --username=postgres --dbname=postgres <<SQL
-DO \$\$
+    -v db_user="$DB_USER" -v db_password="$DB_PASSWORD" \
+    -v alter_password="$ALTER_PASSWORD" \
+    --username=postgres --dbname=postgres <<'SQL'
+SET betfeed.db_user = :'db_user';
+SET betfeed.db_password = :'db_password';
+SET betfeed.alter_password = :'alter_password';
+DO $$
+DECLARE
+    v_user     TEXT := current_setting('betfeed.db_user');
+    v_password TEXT := current_setting('betfeed.db_password');
+    v_alter    BOOLEAN := current_setting('betfeed.alter_password')::int <> 0;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}') THEN
-        CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASSWORD}';
-        RAISE NOTICE 'created role ${DB_USER}';
-    ELSIF ${ALTER_PASSWORD} THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_user) THEN
+        EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', v_user, v_password);
+        RAISE NOTICE 'created role %', v_user;
+    ELSIF v_alter THEN
         -- Existing role with no password recorded in .env: align them so the
         -- DATABASE_URL we are about to write actually works.
-        EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L', '${DB_USER}', '${DB_PASSWORD}');
-        RAISE NOTICE 'reset password for existing role ${DB_USER}';
+        EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L', v_user, v_password);
+        RAISE NOTICE 'reset password for existing role %', v_user;
     ELSE
-        RAISE NOTICE 'role ${DB_USER} already exists — password unchanged';
+        RAISE NOTICE 'role % already exists — password unchanged', v_user;
     END IF;
 END
-\$\$;
+$$;
 SQL
 
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+if ! sudo -u postgres psql -tAc -v db_name="$DB_NAME" \
+    "SELECT 1 FROM pg_database WHERE datname = :'db_name'" | grep -q 1; then
     sudo -u postgres createdb --owner="${DB_USER}" "${DB_NAME}"
     echo "    created database ${DB_NAME}"
 else
     echo "    database ${DB_NAME} already exists"
 fi
 
-DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}"
+DATABASE_URL="postgresql://${DB_USER}:$(urlencode "$DB_PASSWORD")@127.0.0.1:5432/${DB_NAME}"
 
 echo "==> Writing DATABASE_URL to $ENV_FILE"
 
