@@ -6,7 +6,7 @@ implementation so a rewrite that silently changes a published price fails here.
 
 import pytest
 
-from conftest import make_cfg
+from conftest import FakeMarketBook, FakeRunnerBook, make_cfg
 
 from betfeed.odds import (
     LADDER,
@@ -138,6 +138,52 @@ def test_a_value_that_is_not_a_price_is_not_a_probability():
     assert implied_prob(2.0) == 0.5  # unchanged for real prices
     assert overround([2.0, -1.0]) is None
     assert overround([]) == -1.0  # no prices: still an answer, not a crash
+
+def test_a_market_status_with_stray_whitespace_still_settles(caplog):
+    """' CLOSED '.upper() is still ' CLOSED ', which matches nothing.
+
+    The fail-safe direction was right — a status we cannot read is not treated
+    as terminal, so nothing was wrongly settled — but the failure was silent:
+    no result, no log line, and a feed that settles slowly for no visible
+    reason.
+    """
+    from betfeed.normalize import normalise_book, result_from_book
+
+    for raw in (" CLOSED ", "closed_event", "\tCLOSED_EVENT\n", " Closed "):
+        book = normalise_book(FakeMarketBook("1.1", [FakeRunnerBook(1, status="WINNER")],
+                                             status=raw))
+        result = result_from_book(book)
+        assert result is not None, f"{raw!r} did not settle"
+        assert result["status"] == raw          # the raw value still travels
+        assert result["winner_selection_ids"] == [1]
+
+    book = normalise_book(FakeMarketBook("1.1", [FakeRunnerBook(1, status=" WINNER ")],
+                                         status="OPEN"))
+    assert result_from_book(book)["winner_selection_ids"] == [1]
+
+    # An unrecognised status is still not settled, and says so.
+    book = normalise_book(FakeMarketBook("1.1", [FakeRunnerBook(1)], status="WAT"))
+    assert result_from_book(book) is None
+
+
+def test_an_absurdly_deep_ladder_payload_is_refused_by_name(caplog):
+    """_json_safe walked its input with no depth cap, so a ~1200-deep payload
+    raised RecursionError — reported as "this market is bad", every poll,
+    rather than as the absurd input it was."""
+    from betfeed.normalize import MAX_JSON_DEPTH, _json_safe
+
+    deep = value = {}
+    for _ in range(MAX_JSON_DEPTH + 5):
+        value["n"] = {}
+        value = value["n"]
+    with pytest.raises(ValueError, match=f"nested deeper than {MAX_JSON_DEPTH}"):
+        _json_safe(deep)
+
+    # A realistic ladder is nowhere near the cap.
+    assert _json_safe({"selections": [{"back": [{"price": 2.0, "size": 1.0}]}]}) == {
+        "selections": [{"back": [{"price": 2.0, "size": 1.0}]}]
+    }
+
 
 # ── one bad market must not cost the rest of the batch ────────────────────────
 #

@@ -12,17 +12,32 @@ on the exchange is worse than a missing rung.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Iterable
 
 from .contract import state_for
 from .odds import valid_tick
 
+log = logging.getLogger("betfeed.normalize")
+
+# A ladder payload is about four levels deep (payload -> selections -> back ->
+# rung). Python's default recursion limit is ~1000, so anything past this is a
+# hostile or broken upstream payload, not a market.
+MAX_JSON_DEPTH = 32
+
 # Market statuses that mean the market has finished and we should retire it.
 TERMINAL_STATUSES = {"CLOSED", "CLOSED_EVENT", "SETTLED", "VOIDED"}
 # Runner statuses that mean this runner lost/was removed rather than merely
 # being open for betting.
 LOSING_STATUSES = {"LOSER", "REMOVED", "REMOVED_HALF_TIME", "REMOVED_OTHER"}
+
+# Every status we recognise on a market or a runner. Anything else is logged at
+# debug rather than silently treated as "not finished".
+_KNOWN_STATUSES = TERMINAL_STATUSES | LOSING_STATUSES | {
+    "OPEN", "OPEN_INPLAY", "SUSPENDED", "INACTIVE", "ACTIVE", "INPLAY",
+    "PRE_MATCH", "WINNER",
+}
 
 
 def _raw(obj: Any, key: str, default=None):
@@ -125,7 +140,7 @@ def normalise_book(mb) -> dict:
     }
 
 
-def _json_safe(value):
+def _json_safe(value, depth: int = 0):
     """Replace non-finite floats with None, recursively.
 
     Betfair reports an INFINITE size for the best-lay-at-minimum-odds offer
@@ -141,13 +156,22 @@ def _json_safe(value):
     almost every actively-quoted market. NaN has the same problem. Neither has a
     JSON representation, so they are stored as null -- meaning "no finite size
     offered", which is the honest reading of an infinite-size quote.
+
+    DEPTH IS CAPPED. This walked its input with no limit, so a ~1200-deep
+    payload raised RecursionError -- and inside the per-market isolation that
+    was reported as "this market is bad", every poll, forever, rather than as
+    the absurd input it was. A ladder is about four levels deep.
     """
     if isinstance(value, float):
         return value if value == value and value not in (float("inf"), float("-inf")) else None
     if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError(f"ladder payload nested deeper than {MAX_JSON_DEPTH} levels")
+        return {k: _json_safe(v, depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
+        if depth >= MAX_JSON_DEPTH:
+            raise ValueError(f"ladder payload nested deeper than {MAX_JSON_DEPTH} levels")
+        return [_json_safe(v, depth + 1) for v in value]
     return value
 
 
@@ -189,9 +213,13 @@ def result_from_book(book: dict, *, observed_at: datetime | None = None) -> dict
     This is the free result: any book whose status is terminal, or which has
     assigned a WINNER, gives us the outcome with no extra API call.
     """
-    status = (book["status"] or "").upper()
+    # strip(), not just upper(): ' CLOSED ' uppercased is still ' CLOSED ', which
+    # matches nothing in TERMINAL_STATUSES, so a stray space silently produced
+    # no result at all. Silent non-settlement is exactly the failure mode that
+    # makes a feed settle slowly for no visible reason.
+    status = (book["status"] or "").strip().upper()
     runners = book["selections"]
-    winners = [s["selection_id"] for s in runners if (s["status"] or "").upper() == "WINNER"]
+    winners = [s["selection_id"] for s in runners if (s["status"] or "").strip().upper() == "WINNER"]
 
     # A market is settled when Betfair says it is finished, or when it has named
     # a WINNER. Nothing else.
@@ -210,6 +238,12 @@ def result_from_book(book: dict, *, observed_at: datetime | None = None) -> dict
     # by itself, settle or void a market.
     settled = status in TERMINAL_STATUSES or bool(winners)
     if not settled:
+        # "I saw a status I could not read" is worth a line. Without it, an
+        # unrecognised status is indistinguishable from an ordinary open market
+        # and nothing ever says why a finished event did not settle.
+        if status and status not in _KNOWN_STATUSES:
+            log.debug("unrecognised market status %r on %s; not settled",
+                      book["status"], book.get("market_id"))
         return None
 
     # Void comes only from Betfair saying the market was voided. Inferring it
