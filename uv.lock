@@ -38,14 +38,14 @@ wheels = [
 
 [[package]]
 name = "betfairlightweight"
-version = "2.20.4"
+version = "2.24.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/70/80/d02bd65d18e372eff2e4b3821de3f24078dd86943ac98e0adb54675411ab/betfairlightweight-2.20.4.tar.gz", hash = "sha256:d093ea9c505021219c6ef85e069217e527ca983d9bcdba8ecf45e6f203be64f1", size = 218859, upload-time = "2024-10-23T09:42:43.607Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/fb/56819027833bb50ff94d5b00b9a8f2592956deb66d901eb5b68fba1d3e77/betfairlightweight-2.24.0.tar.gz", hash = "sha256:ce4238d25628db34380cc45598c0b5091efe4e29084875803d9489d4879d00df", size = 221221, upload-time = "2026-09-04T07:44:40.865Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/ce/855c5bf10460de9d21e357e1010f890d8ea949093deeff69beef42e8732a/betfairlightweight-2.20.4-py3-none-any.whl", hash = "sha256:8510604e9e0b04baf6dbcbfb9cbb7b82c55e9efaf23f13704aa647a9fd1ed8ff", size = 69255, upload-time = "2024-10-23T09:42:41.77Z" },
+    { url = "https://files.pythonhosted.org/packages/70/38/4f1dbe769e1d3b4518da3793407e5b7e3b1d87f123d49128992343a8f6a2/betfairlightweight-2.24.0-py3-none-any.whl", hash = "sha256:04f6c5d07d193d72670bfc7433f5efe4ca2e6b20565e5fa19105145c5b7987a4", size = 69989, upload-time = "2026-09-04T07:44:39.453Z" },
 ]
 
 [[package]]
@@ -65,7 +65,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "betfairlightweight", specifier = ">=2.20.4" },
+    { name = "betfairlightweight", specifier = ">=2.24.0" },
     { name = "fastmcp", specifier = ">=2.9.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
 ]

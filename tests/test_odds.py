@@ -4,6 +4,10 @@ Values below are the ladder's own definition, asserted independently of the
 implementation so a rewrite that silently changes a published price fails here.
 """
 
+import pytest
+
+from conftest import make_cfg
+
 from betfeed.odds import (
     LADDER,
     MAX_PRICE_CENTS,
@@ -123,3 +127,153 @@ def test_overround_and_probability():
     assert overround([2.0, 2.0]) == 0.0
     # A 2.0/2.0 book quoted at 1.95/1.95 has margin.
     assert overround([1.95, 1.95]) > 0
+
+# ── one bad market must not cost the rest of the batch ────────────────────────
+#
+# The odds job iterates a poll scope of ~240 markets in ONE loop, and
+# normalise_book -> valid_tick ran arithmetic on whatever arrived on the wire. A
+# single non-finite price raised from deep inside math.floor(), and because there
+# was no per-market guard that ended the WHOLE loop: every market after the bad
+# one silently stopped updating, with no error recorded anywhere. poll_scope then
+# picked the same markets next cycle, so it repeated forever — a board quietly
+# going stale with a green job log.
+#
+# Two halves to the fix, both asserted here: the arithmetic refuses a non-finite
+# price with a clear reason instead of an opaque OverflowError, and the loop
+# isolates one market so the batch survives.
+
+
+def test_a_non_finite_price_is_rejected_with_a_clear_reason():
+    """Not `OverflowError: cannot convert float infinity to integer`.
+
+    Two distinct rejections, because there are two distinct faults: a
+    non-finite input, and a finite input whose value OVERFLOWS once scaled to
+    cents (1e308 is finite; 1e308 * 100 is not). Both must name themselves, so an
+    operator reading a log knows which one they hit.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError) as e:
+            valid_tick(bad)
+        assert "non-finite" in str(e.value), f"unclear reason for {bad!r}: {e.value}"
+
+    # 1e308 is finite. Checking only the INPUT leaves floor() to raise
+    # OverflowError on the scaled value — which is exactly what this test found.
+    with pytest.raises(ValueError) as e:
+        valid_tick(1e308)
+    assert "overflow" in str(e.value), f"1e308 must be rejected as an overflow: {e.value}"
+
+
+def test_the_finite_boundary_is_unchanged():
+    """The new check must not make the ladder permissive."""
+    for good in (1.01, 1.5, 2.0, 100.0, 1000.0):
+        assert valid_tick(good) is True, f"{good} is a ladder tick and must stay valid"
+    assert valid_tick(0.99) is False, "below the floor"
+    assert valid_tick(1000.01) is False, "above the ceiling"
+
+
+def test_infinite_SIZE_is_still_handled():
+    """Betfair's infinite-size 1.01 lay is a REAL response and must still work.
+
+    The finiteness check is on PRICE only. A non-finite size is normalised to
+    null, which is what stops it becoming invalid JSON — load-bearing behaviour
+    that a blanket check would have broken.
+    """
+    from betfeed.normalize import _json_safe
+
+    assert _json_safe({"size": float("inf")}) == {"size": None}
+    assert _json_safe({"price": float("nan")}) == {"price": None}
+
+
+def test_one_bad_market_does_not_abort_the_batch():
+    """Three markets in scope, the middle one unreadable. The other two must
+    still be written, and the failure must be counted and named."""
+    from betfeed.jobs import odds as odds_job
+
+    attempted = []
+
+    class FakeConn:
+        """Just enough of a connection for the scope query."""
+
+        def execute(self, q, params=None):
+            return self
+
+        def fetchall(self):
+            return [
+                {"market_id": "1.1", "fixture_id": "10"},
+                {"market_id": "1.2", "fixture_id": "10"},
+                {"market_id": "1.3", "fixture_id": "10"},
+            ]
+
+    class FakeMarketBook:
+        def __init__(self, market_id):
+            self.market_id = market_id
+
+    class FakeRunner:
+        def __init__(self, selection_id):
+            self.selection_id = selection_id
+
+    class FakeClient:
+        # Yields ALL THREE, always. A generator that RAISES is permanently dead,
+        # so a raise here could only ever prove "the batch stops", not "the bad
+        # market is skipped". The realistic failure is one unreadable BOOK among
+        # healthy ones — the client streams fine and the normaliser rejects one —
+        # and that is what the per-market guard is for.
+        def list_market_book(self, ids):
+            for mid in ids:
+                attempted.append(mid)
+                yield FakeMarketBook(mid)
+
+    written = {"snapshots": 0, "current": 0}
+    real_normalise = odds_job.normalise_book
+
+    def flaky_normalise(mb):
+        if mb.market_id == "1.2":
+            raise ValueError("non-finite price: nan")
+        return real_normalise(mb)
+
+    monkey = {
+        "ensure_partitions": lambda *a, **k: None,
+        "advisory_lock": lambda *a, **k: _Lock(),
+        "JobRun": _JobRun,
+        "normalise_book": flaky_normalise,
+        "_write_snapshots": lambda c, r: written.__setitem__("snapshots", len(r)) or len(r),
+        "_write_current": lambda c, r: written.__setitem__("current", len(r)) or len(r),
+        "_update_market_status": lambda *a, **k: None,
+        "_retire_finished": lambda *a, **k: None,
+        "write_result": lambda *a, **k: False,
+    }
+    import betfeed.jobs.odds as mod
+    saved = {k: getattr(mod, k) for k in monkey}
+    for k, v in monkey.items():
+        setattr(mod, k, v)
+    try:
+        stats = odds_job.run_odds(FakeConn(), FakeClient(), make_cfg())
+    finally:
+        for k, v in saved.items():
+            setattr(mod, k, v)
+
+    assert attempted == ["1.1", "1.2", "1.3"], f"every market attempted (got {attempted})"
+    assert stats["errors"] == 1, f"exactly one failure counted (got {stats['errors']})"
+    assert written["snapshots"] == 2, f"the two good markets were still stored (got {written['snapshots']})"
+
+
+class _Lock:
+    def __enter__(self):
+        return True
+
+    def __exit__(self, *a):
+        return False
+
+
+class _JobRun:
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def count(self, **k):
+        pass

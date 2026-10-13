@@ -9,6 +9,35 @@ This project is **pre-1.0**. There are no releases yet; changes land on `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The committed lockfile pinned the broken version.** `uv.lock` had
+  `betfairlightweight 2.20.4` while `pyproject.toml` required `>=2.24.0` — and
+  2.20.4 REJECTS the `betDelayModels` field Betfair now returns, so it pinned
+  the version that breaks every catalogue call. CI ran a bare `uv sync`, which
+  silently re-resolves and rewrites the lock inside the job, so the committed
+  lock was never what got tested and every green run was just whatever PyPI
+  served that day. The lock is regenerated and CI now runs `uv lock --check` and
+  `uv sync --locked`, so drift is a hard failure instead of a silent re-resolve.
+- **One bad market no longer destroys the rest of the batch.** The odds job
+  iterated ~240 markets in one loop with no per-market guard, and
+  `normalise_book` → `valid_tick` ran arithmetic on whatever arrived on the wire.
+  A single non-finite price raised from inside `math.floor()`, which ended the
+  whole loop: every market after the bad one silently stopped updating, with no
+  error recorded anywhere, and `poll_scope` picked the same markets next cycle so
+  it repeated forever. Now each market is isolated, counted, and named in the log
+  — and the collector keeps everything it already collected.
+  Two subtleties the tests forced:
+  - The loop drives the iterator BY HAND. A `for` calls `next()` at the top of the
+    body, so a `try:` around the body cannot catch a failure raised by the
+    ITERATOR — which is exactly where a paginated fetch fails. The first version
+    of this fix was in the wrong place and a test proved it.
+  - A finite price can still overflow when scaled: 1e308 is finite and
+    1e308 × 100 is not, so checking only the input left `floor()` to raise
+    anyway. Both the input and the scaled value are checked now.
+  Verified against live Betfair after the restructure: 8,847 markets, 8,847
+  snapshots, 4 results, 0 errors.
+
 ### Documentation
 
 - The README's "Results and settlement" section now states the two rules that

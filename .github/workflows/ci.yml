@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --locked
       - name: Tests
         run: uv run pytest -q
 
@@ -58,7 +58,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.13'
-      - run: uv sync --all-extras --dev
+      # --locked, NOT a bare `uv sync`. A plain sync silently RE-RESOLVES and
+      # rewrites uv.lock inside the job, so the committed lockfile is not what
+      # gets tested: every green run was whatever PyPI served at that moment, and
+      # the hash-pinning a lock exists to provide was gone.
+      #
+      # This was not theoretical. The committed lock pinned
+      # betfairlightweight 2.20.4 while pyproject required >=2.24.0 — and 2.20.4
+      # REJECTS the `betDelayModels` field Betfair now returns, so it was pinning
+      # the version that breaks every catalogue call. Plain `uv sync` papered
+      # over it; `uv sync --locked` fails loudly instead, which is the point.
+      - run: uv lock --check
+      - run: uv sync --all-extras --dev --locked
       - name: Boots from the environment with no .env
         env:
           DATABASE_URL: postgresql://u:p@127.0.0.1:5432/db
@@ -89,7 +100,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.13'
-      - run: uv sync --all-extras --dev
+      - run: uv sync --all-extras --dev --locked
       - name: .env.example matches the real defaults
         run: |
           uv run python -c "
@@ -132,7 +143,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.13'
-      - run: uv sync --all-extras --dev
+      - run: uv sync --all-extras --dev --locked
       - name: Schema applies cleanly (idempotent)
         run: |
           uv run betfeed migrate

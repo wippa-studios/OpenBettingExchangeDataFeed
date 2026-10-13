@@ -68,49 +68,97 @@ def _poll(conn, client: BetfairClient, cfg: Config, stats: dict) -> None:
     current: list = []
     market_status_rows: list = []
 
-    for mb in client.list_market_book(market_ids):
-        book = normalise_book(mb)
-        market_id = book["market_id"]
-        if not market_id:
-            continue
-        payload = ladder_payload(book)
-        fixture_id = fixture_of.get(market_id)
+    # PER-MARKET ISOLATION. One raise inside this loop used to end the whole
+    # batch: every market after the bad one silently stopped updating, with no
+    # error and no way to tell from the data. One malformed book — or a price
+    # the normaliser cannot handle — cost 40 markets' worth of freshness each
+    # time it happened, because poll_scope picks the same markets every cycle.
+    #
+    # A single unreadable market is not a reason to abandon the other 239. Skip
+    # it, count it, and log WHICH, so the failure is visible rather than a
+    # board that quietly goes stale.
+    skipped: list[str] = []
 
-        snapshots.append(
-            (
-                captured_at,
-                market_id,
-                fixture_id,
-                book["status"],
-                book["inplay"],
-                book["publish_time"],
-                book["total_matched"],
-                # JSONB: psycopg3 will not adapt a dict for a %s placeholder
-                # (ProgrammingError: cannot adapt type 'dict'), so wrap it. Same
-                # reason as market_result.runners in jobs/fixtures.py.
-                Jsonb(payload),
+    # Drive the iterator BY HAND rather than with `for`. A `for` calls next() at
+    # the TOP of the body, so a `try:` around the body cannot catch a failure
+    # raised by the ITERATOR itself — and this client fetches paginated, so a
+    # network error or a malformed page partway through raises exactly there. The
+    # first version of this fix put the try in the wrong place and a test proved
+    # it: one bad page still killed the batch.
+    #
+    # Iterator-level failure is not recoverable (there is no next() after a
+    # raised generator), so it is counted and the loop ends — but everything
+    # already collected is still written below, so a mid-batch failure degrades
+    # freshness rather than stopping the poll.
+    books = iter(client.list_market_book(market_ids))
+    while True:
+        try:
+            mb = next(books)
+        except StopIteration:
+            break
+        except Exception:
+            stats["errors"] += 1
+            log.warning(
+                "market stream failed after %d book(s); keeping what was collected",
+                len(snapshots),
+                exc_info=True,
             )
-        )
-        current.append(
-            (
-                market_id,
-                captured_at,
-                book["status"],
-                book["inplay"],
-                book["bet_delay"],
-                book["publish_time"],
-                book["total_matched"],
-                Jsonb(payload),
-            )
-        )
-        market_status_rows.append(
-            (market_id, book["status"], book["inplay"], book["total_matched"], captured_at)
-        )
+            break
+        try:
+            book = normalise_book(mb)
+            market_id = book["market_id"]
+            if not market_id:
+                continue
+            payload = ladder_payload(book)
+            fixture_id = fixture_of.get(market_id)
 
-        result = result_from_book(book, observed_at=captured_at)
-        if result:
-            if write_result(conn, result):
-                stats["results"] += 1
+            snapshots.append(
+                (
+                    captured_at,
+                    market_id,
+                    fixture_id,
+                    book["status"],
+                    book["inplay"],
+                    book["publish_time"],
+                    book["total_matched"],
+                    # JSONB: psycopg3 will not adapt a dict for a %s placeholder
+                    # (ProgrammingError: cannot adapt type 'dict'), so wrap it. Same
+                    # reason as market_result.runners in jobs/fixtures.py.
+                    Jsonb(payload),
+                )
+            )
+            current.append(
+                (
+                    market_id,
+                    captured_at,
+                    book["status"],
+                    book["inplay"],
+                    book["bet_delay"],
+                    book["publish_time"],
+                    book["total_matched"],
+                    Jsonb(payload),
+                )
+            )
+            market_status_rows.append(
+                (market_id, book["status"], book["inplay"], book["total_matched"], captured_at)
+            )
+
+            result = result_from_book(book, observed_at=captured_at)
+            if result:
+                if write_result(conn, result):
+                    stats["results"] += 1
+        except Exception as exc:
+            # Skip this market, keep the batch. The whole point of the try above.
+            mid = getattr(mb, "market_id", None) or "?"
+            skipped.append(str(mid))
+            stats["errors"] += 1
+            log.warning("skipping market %s: %s: %s", mid, type(exc).__name__, exc)
+
+    if skipped:
+        log.warning(
+            "%d of %d market(s) could not be read this poll: %s",
+            len(skipped), len(market_ids), ", ".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""),
+        )
 
     if not snapshots:
         stats["errors"] += len(market_ids)

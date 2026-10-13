@@ -29,7 +29,29 @@ MAX_PRICE_CENTS = 100000
 
 
 def price_to_cents(p: float) -> int:
-    return _round_half_up(float(p) * 100)
+    # A non-finite price used to raise deep inside _round_half_up's
+    # math.floor(), as an OverflowError or a bare "cannot convert float NaN to
+    # integer". That is raised once per ladder RUNG, from inside a loop over a
+    # whole market book — so one bad price took down every other runner beside
+    # it, and because the odds job had no per-market try/except, every remaining
+    # market in the batch too. One bad rung and those markets stop updating,
+    # silently.
+    #
+    # Betfair DOES emit Infinity as a SIZE (its infinite-size 1.01 lay), which
+    # is handled separately and correctly. A non-finite PRICE is not an expected
+    # input, so this is defence in depth — but crashing a whole batch is not a
+    # proportionate response to a bad number, and the caller cannot express
+    # "skip this rung" because there is no try.
+    v = float(p)
+    if not math.isfinite(v):
+        raise ValueError(f"non-finite price: {p!r}")
+    scaled = v * 100.0
+    # The INPUT being finite is not enough: 1e308 is finite and 1e308 * 100 is
+    # inf, so floor() still raises OverflowError two lines later. Check the value
+    # that actually reaches the rounding.
+    if not math.isfinite(scaled):
+        raise ValueError(f"price overflows the cent scale: {p!r}")
+    return _round_half_up(scaled)
 
 
 def _round_half_up(x: float) -> int:
