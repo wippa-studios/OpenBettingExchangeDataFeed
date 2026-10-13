@@ -120,6 +120,11 @@ def test_a_saturated_catalogue_chunk_splits_to_stay_complete():
     # e2 is recovered because the saturated chunk was split.
     assert {m.event.id for m in markets} == {"e1", "e2"}
     assert len(betting.catalogue_calls) > 1
+    # ...and nothing is yielded twice. The set assertion above is satisfied by
+    # a yield of e1's five markets followed by a re-fetch of the same five, so
+    # it could not see the duplication; this one can.
+    ids = [m.market_id for m in markets]
+    assert len(ids) == len(set(ids)), f"duplicated markets: {sorted(i for i in ids if ids.count(i) > 1)}"
 
 
 def test_an_unsplittable_saturated_event_is_recorded_not_hidden():

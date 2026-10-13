@@ -92,6 +92,16 @@ class BetfairClient:
         self.truncated_events: list[str] = []
         self.unfetchable_markets: list[str] = []
 
+    def reset_run_counters(self) -> None:
+        """Clear the per-run failure lists.
+
+        Both are read as per-run stats by the jobs and land in feed_run. The
+        client is shared for the lifetime of the collector process, so without
+        this every run reported every failure since startup.
+        """
+        self.truncated_events.clear()
+        self.unfetchable_markets.clear()
+
     # ── session ──────────────────────────────────────────────────────────────
 
     def _build_client(self) -> APIClient:
@@ -346,6 +356,14 @@ class BetfairClient:
                              len(batch), self.cfg.catalogue_max_results)
                     mid = len(batch) // 2
                     pending[:0] = [batch[:mid], batch[mid:]]
+                    # Do NOT yield the saturated page. The two halves re-cover
+                    # it exactly, so yielding it first shipped every one of its
+                    # markets twice — measured 10-market event + 1-market event
+                    # with a cap of 5: 11 yielded, 6 unique. Upserts are
+                    # idempotent so the data was right, but the stats inflated
+                    # and the work doubled. The shipped test asserted on a set
+                    # of event ids and could not see it.
+                    continue
             yield from markets
 
     # ── prices ───────────────────────────────────────────────────────────────

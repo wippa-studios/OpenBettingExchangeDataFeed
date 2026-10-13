@@ -740,6 +740,26 @@ def test_one_bad_book_does_not_abort_the_results_sweep(db):
     ).fetchone()["ok"] is True
 
 
+def test_failure_counters_are_per_run_not_cumulative(db):
+    """The collector shares one client for the process lifetime, so these lists
+    were lifetime-cumulative: every run reported every failure since startup and
+    feed_run.items_err grew monotonically. An operator reading feed_health could
+    not tell whether THIS run had failures."""
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
+                          catalogue={"3001": list(markets.values())})
+    cfg = make_cfg(DATABASE_URL=TEST_URL, CATALOGUE_MAX_RESULTS="1", SCORES_ENABLED="false")
+    client = BetfairClient(cfg, sleeper=lambda _s: None)
+    install_fake_client(client, betting=betting, scores=FakeScores())
+
+    run_fixtures(db, client, cfg)
+    assert client.truncated_events, "the oversized event should have been truncated"
+    run_fixtures(db, client, cfg)
+    assert len(client.truncated_events) == 1, (
+        f"counters accumulated across runs: {client.truncated_events}"
+    )
+
+
 # ── scores ────────────────────────────────────────────────────────────────
 
 def _score(event_id, home="Test Utd", hs="2", away="Arsenal", as_="1"):

@@ -50,6 +50,12 @@ def run_fixtures(conn: psycopg.Connection, client: BetfairClient, cfg: Config) -
         if not locked:
             return {**stats, "skipped": True}
         with JobRun(conn, "fixtures") as run:
+            # One client is shared for the process lifetime, so these two lists
+            # were cumulative for the lifetime of the collector. Every run
+            # reported the whole week's truncated events, feed_run.items_err
+            # grew monotonically, and an operator reading feed_health could not
+            # tell whether THIS run had failures. They also grew without bound.
+            client.reset_run_counters()
             ensure_partitions(conn, behind_days=2, ahead_days=3)
             _cache_event_types(conn, client, cfg)
             for event_type_id in cfg.event_type_ids:
