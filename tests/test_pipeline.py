@@ -57,20 +57,27 @@ def db():
     conn.close()
 
 
-def soccer_world():
-    """One soccer fixture, three markets, seven runners."""
+def soccer_world(start: datetime | None = None):
+    """One soccer fixture, two markets, five runners.
+
+    ``start`` is the markets' start time, and it is not only decoration: the
+    fixtures job re-upserts ``market_start_time`` from the catalogue on every
+    run, so a test that backdates the market in the database must build the
+    fakes with a past ``start`` too or the next run puts it back in the future.
+    """
+    start = start or (NOW + timedelta(hours=2))
     fixture = FakeEvent("3001", "Test Utd v Arsenal", country_code="GB", venue="Old Trafford")
     markets = {
         "1.100": FakeCatalogueMarket(
             "1.100", fixture, "MATCH_ODDS", market_name="Match Odds",
             runners=[FakeRunnerCatalogue(11, "Test Utd", 1), FakeRunnerCatalogue(12, "Draw", 2),
                      FakeRunnerCatalogue(13, "Arsenal", 3)],
-            start=NOW + timedelta(hours=2),
+            start=start,
         ),
         "1.101": FakeCatalogueMarket(
             "1.101", fixture, "OVER_UNDER_25", market_name="Total Goals 0-2",
             runners=[FakeRunnerCatalogue(21, "Under", 1), FakeRunnerCatalogue(22, "Over", 2)],
-            start=NOW + timedelta(hours=2),
+            start=start,
         ),
     }
     return fixture, markets
@@ -316,14 +323,15 @@ def test_results_are_readable_while_the_market_is_still_active(db):
 
 def test_the_fixtures_job_backfills_a_result_nobody_was_there_to_see(db):
     """If the odds job was down when the event finished, feed 1 still finds it."""
-    fixture, markets = soccer_world()
+    # The event finished an hour ago and nobody has a result for it. The start
+    # time is built into the FAKES, not written to the database afterwards: every
+    # fixtures run re-upserts market_start_time from the catalogue, so a fake
+    # still claiming NOW+2h would push the market back into the future and the
+    # sweep's unresolved_scope (market_start_time < now()) would never see it.
+    fixture, markets = soccer_world(start=NOW - timedelta(hours=1))
     betting = FakeBetting(events={"1": [FakeEventResult(fixture)]},
                           catalogue={"3001": list(markets.values())})
     run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
-
-    # The event finished an hour ago and nobody has a result for it.
-    db.execute("UPDATE market SET market_start_time = now() - interval '1 hour'")
-    db.commit()
 
     sweep = FakeBetting(books={
         "1.100": settled_book("1.100", [FakeRunnerBook(11, status="WINNER"),
@@ -388,16 +396,52 @@ def test_health_reports_freshness_and_failures(db):
 def test_a_failed_job_is_recorded_and_rolls_back(db):
     """A job that dies mid-poll must not leave half-written state, and must be
     visible in feed_run."""
+    fixture, markets = soccer_world()
+    betting = FakeBetting(events={"1": [FakeEventResult(fixture, market_count=2)]},
+                          catalogue={"3001": list(markets.values())})
+    run_job(db, run_fixtures, betting, SCORES_ENABLED="false")
     before = db.execute("SELECT count(*) n FROM market").fetchone()["n"]
+    # Without a seeded table "nothing changed" below is satisfied by an empty
+    # database no matter what the failed run did.
+    assert before == 2
 
     class Exploding(FakeBetting):
-        def list_event_types(self, *a, **k):
-            raise RuntimeError("boom")
+        """Collects soccer — writing two markets the seeded run never saw — and
+        then dies on the next sport, with those writes still uncommitted."""
+
+        def __init__(self, inner):
+            other = FakeEvent("3002", "Chelsea v City", country_code="GB", venue="Stamford Bridge")
+            super().__init__(
+                events={"1": inner.events["1"] + [FakeEventResult(other)]},
+                catalogue={
+                    "3001": inner.catalogue["3001"],
+                    "3002": [
+                        FakeCatalogueMarket(
+                            "1.200", other, "MATCH_ODDS",
+                            runners=[FakeRunnerCatalogue(31, "Chelsea", 1),
+                                     FakeRunnerCatalogue(32, "City", 2)],
+                        ),
+                    ],
+                },
+            )
+
+        def list_events(self, filter=None, locale=None):
+            # list_events, NOT list_event_types: _cache_event_types swallows any
+            # failure from list_event_types on purpose ("a stale cache is better
+            # than no feed"), so an exception raised there can never fail a run.
+            # list_events is the first call in the job that nothing wraps.
+            if "7" in ((filter or {}).get("eventTypeIds") or []):
+                raise RuntimeError("boom")
+            return super().list_events(filter=filter, locale=locale)
 
     with pytest.raises(RuntimeError):
-        run_job(db, run_fixtures, Exploding(), SCORES_ENABLED="false")
+        run_job(db, run_fixtures, Exploding(betting), EVENT_TYPE_IDS="1,7",
+                SCORES_ENABLED="false")
 
-    assert db.execute("SELECT count(*) n FROM market").fetchone()["n"] == before
+    after = db.execute("SELECT count(*) n FROM market").fetchone()["n"]
+    assert after == before, (
+        f"the failed run's {after - before} write(s) survived the rollback"
+    )
     failed = db.execute("SELECT * FROM feed_run WHERE NOT ok ORDER BY run_id DESC LIMIT 1").fetchone()
     assert failed is not None
     assert "boom" in failed["error"]

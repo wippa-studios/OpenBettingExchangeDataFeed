@@ -16,7 +16,16 @@ import pytest
 
 from betfeed.config import DEFAULTS, Config
 
-NOW = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
+# The fake "now" every Fake* below stamps its data with.
+#
+# DERIVED FROM THE REAL CLOCK, not frozen to a literal date. The pipeline tests
+# move market start times with SQL `now()`, which is the DATABASE clock, and a
+# frozen fake time drifts away from it as the day goes on. The fixtures job then
+# re-upserts `market_start_time` from the catalogue, putting the market back at
+# NOW+2h — so a test that backdated a market into the past only ever satisfied
+# `unresolved_scope` (market_start_time < now()) during the part of the day when
+# the two clocks happened to agree. Green at 15:00 UTC, red at 02:00 UTC.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def make_cfg(**overrides) -> Config:
