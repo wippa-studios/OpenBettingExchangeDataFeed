@@ -113,6 +113,30 @@ def test_betfair_status_is_not_collapsed():
     assert state_for("something-new") == "upcoming"  # unknown -> pre-game
 
 
+def test_an_infinite_size_lay_is_null_not_zero():
+    """Betfair's infinite-size offer is the 1.01 lay that takes any stake.
+
+    normalize stores it as null (Infinity has no JSON representation), and
+    `float(size or 0.0)` then published it as {"price": 1.01, "size": 0.0} —
+    the most liquid offer on the book, reported as nothing available. The
+    selection-level size in the same document was already None, so one input
+    was represented two different ways.
+    """
+    market = {
+        "market_key": "1.234",
+        "name": "Match Odds",
+        "selections": [{
+            "selection_key": 1, "name": "Home", "price": 1.01, "size": None,
+            "lay": [{"price": 1.01, "size": None}, {"price": 1.02, "size": 50.0}],
+        }],
+    }
+    sel = make_feed([_event(market=market)])["events"][0]["markets"][0]["selections"][0]
+    assert sel["size"] is None
+    assert sel["lay"] == [{"price": 1.01, "size": None}, {"price": 1.02, "size": 50.0}]
+    # ...and one representation is used for both fields.
+    assert sel["size"] == sel["lay"][0]["size"]
+
+
 def test_structural_errors_name_the_path():
     with pytest.raises(ContractError, match=r"events\[0\].event_key is required"):
         validate_feed({"version": 1, "events": [{"name": "x", "starts_at": "2026-01-01"}]})

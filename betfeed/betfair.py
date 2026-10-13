@@ -254,16 +254,20 @@ class BetfairClient:
 
     # ── navigation ───────────────────────────────────────────────────────────
 
-    def list_event_types(self) -> list[dict]:
+    def list_event_types(self, *, locale: str | None = None) -> list[dict]:
         """(id, name, market_count) for every sport on the exchange."""
-        results = self._call("list_event_types", self.client.betting.list_event_types)
+        results = self._call(
+            "list_event_types",
+            self.client.betting.list_event_types,
+            locale=self.cfg.locale if locale is None else locale,
+        )
         out = []
         for r in results:
             et = r.event_type
             out.append({"id": et.id, "name": et.name, "market_count": r.market_count})
         return out
 
-    def list_events(self, event_type_id: str) -> list[dict]:
+    def list_events(self, event_type_id: str, *, locale: str | None = None) -> list[dict]:
         """Every event Betfair currently lists for one sport."""
         from betfairlightweight.filters import market_filter
 
@@ -271,7 +275,7 @@ class BetfairClient:
             "list_events",
             self.client.betting.list_events,
             filter=market_filter(event_type_ids=[event_type_id]),
-            locale=self.cfg.locale,
+            locale=self.cfg.locale if locale is None else locale,
         )
         out = []
         for r in results:
@@ -289,18 +293,33 @@ class BetfairClient:
             )
         return out
 
-    def _catalogue_for_events(self, event_ids: list[str]) -> list:
+    def _catalogue_for_events(
+        self,
+        event_ids: list[str],
+        *,
+        market_type_codes: Sequence[str] | None = None,
+        max_results: int | None = None,
+        locale: str | None = None,
+    ) -> list:
         from betfairlightweight.filters import market_filter
 
         flt: dict = {"event_ids": event_ids}
-        if self.cfg.market_type_codes:
-            flt["market_type_codes"] = self.cfg.market_type_codes
+        codes = self.cfg.market_type_codes if market_type_codes is None else market_type_codes
+        if codes:
+            flt["market_type_codes"] = list(codes)
 
         return self._call(
             "list_market_catalogue",
             self.client.betting.list_market_catalogue,
             filter=market_filter(**flt),
-            max_results=self.cfg.catalogue_max_results,
+            # The configured cap is a floor for safety, not a ceiling we hide
+            # behind: a DELAY key answers >200 with ANGX-0001, so a caller
+            # cannot raise it per-call — CATALOGUE_MAX_RESULTS is the operator's
+            # lever. A caller asking for less is honoured.
+            max_results=min(
+                self.cfg.catalogue_max_results if max_results is None else int(max_results),
+                self.cfg.catalogue_max_results,
+            ),
             # Configurable, because two of these fields do not exist on a
             # DELAY app key and asking for them fails the whole request:
             #   MARKET_DESCRIPTION -> ANGX-0001
@@ -316,10 +335,17 @@ class BetfairClient:
             # want the extra fields back.
             market_projection=list(self.cfg.catalogue_projection),
             sort="FIRST_TO_START",
-            locale=self.cfg.locale,
+            locale=self.cfg.locale if locale is None else locale,
         )
 
-    def list_market_catalogue(self, event_ids: Sequence[str]) -> Iterator:
+    def list_market_catalogue(
+        self,
+        event_ids: Sequence[str],
+        *,
+        market_type_codes: Sequence[str] | None = None,
+        max_results: int | None = None,
+        locale: str | None = None,
+    ) -> Iterator:
         """Catalogue markets for events, chunked and as complete as Betfair allows.
 
         Betfair caps a catalogue filter at 100 event ids and a response at
@@ -340,7 +366,12 @@ class BetfairClient:
         while pending:
             batch = pending.pop(0)
             try:
-                markets = self._catalogue_for_events(batch)
+                markets = self._catalogue_for_events(
+                    batch,
+                    market_type_codes=market_type_codes,
+                    max_results=max_results,
+                    locale=locale,
+                )
             except TooMuchDataError:
                 if len(batch) == 1:
                     log.error("catalogue: single event %s exceeds weight limit, skipping", batch[0])
@@ -375,22 +406,37 @@ class BetfairClient:
 
     # ── prices ───────────────────────────────────────────────────────────────
 
-    def _books_for_ids(self, market_ids: list[str], *, traded: bool) -> list:
+    def _books_for_ids(
+        self,
+        market_ids: list[str],
+        *,
+        traded: bool,
+        ladder_levels: int | None = None,
+        locale: str | None = None,
+    ) -> list:
         from betfairlightweight.filters import price_data, price_projection
 
+        levels = self.cfg.ladder_levels if ladder_levels is None else int(ladder_levels)
         projection = price_projection(
             price_data(ex_best_offers=True, ex_traded=traded),
-            ex_best_offers_overrides={"ladder_levels": self.cfg.ladder_levels},
+            ex_best_offers_overrides={"ladder_levels": max(1, min(levels, 10))},
         )
         return self._call(
             "list_market_book",
             self.client.betting.list_market_book,
             market_ids=market_ids,
             price_projection=projection,
-            locale=self.cfg.locale,
+            locale=self.cfg.locale if locale is None else locale,
         )
 
-    def list_market_book(self, market_ids: Sequence[str], *, traded: bool | None = None) -> Iterator:
+    def list_market_book(
+        self,
+        market_ids: Sequence[str],
+        *,
+        traded: bool | None = None,
+        ladder_levels: int | None = None,
+        locale: str | None = None,
+    ) -> Iterator:
         """Market books with best offers, chunked by weight.
 
         On ``TOO_MUCH_DATA`` the chunk halves and retries, so the chunk size is
@@ -401,7 +447,9 @@ class BetfairClient:
         while pending:
             batch = pending.pop(0)
             try:
-                books = self._books_for_ids(batch, traded=use_traded)
+                books = self._books_for_ids(
+                    batch, traded=use_traded, ladder_levels=ladder_levels, locale=locale
+                )
             except TooMuchDataError:
                 if len(batch) == 1:
                     # Even alone this market is too heavy. Record it: an odds

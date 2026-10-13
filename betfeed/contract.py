@@ -125,7 +125,7 @@ def _validate_price(price: Any, path: str) -> float | None:
     return value
 
 
-def _validate_ladder(raw: Any, path: str) -> list[dict[str, float]]:
+def _validate_ladder(raw: Any, path: str) -> list[dict[str, float | None]]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -137,10 +137,23 @@ def _validate_ladder(raw: Any, path: str) -> list[dict[str, float]]:
         price = _validate_price(rung.get("price"), f"{path}[{i}]")
         if price is None:
             raise ContractError(f"{path}[{i}].price is required")
-        try:
-            size = float(rung.get("size") or 0.0)
-        except (TypeError, ValueError):
-            raise ContractError(f"{path}[{i}].size must be a number") from None
+        # Size is "number or null", never null-as-zero. Betfair's infinite-size
+        # offer — the 1.01 lay that takes any stake — is stored as null because
+        # it has no JSON representation, and `float(x or 0.0)` published that
+        # as {"price": 1.01, "size": 0.0}: the most liquid offer on the book
+        # reported as nothing available. The selection-level size in the same
+        # document was already None for the same value, so one input was
+        # represented two different ways. The README already warns consumers
+        # that treating null size as zero under-reports the 1.01 lay; betfeed's
+        # own output was doing it.
+        raw_size = rung.get("size")
+        if raw_size is None:
+            size = None
+        else:
+            try:
+                size = float(raw_size)
+            except (TypeError, ValueError):
+                raise ContractError(f"{path}[{i}].size must be a number or null") from None
         out.append({"price": price, "size": size})
     return out
 

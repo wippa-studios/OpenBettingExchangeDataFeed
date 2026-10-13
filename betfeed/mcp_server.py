@@ -123,7 +123,7 @@ def list_event_types(locale: Optional[str] = None) -> dict[str, Any]:
         Dict[str, Any]: {"event_types": [{"id", "name", "market_count"}]}
     """
     try:
-        return {"event_types": trading().list_event_types()}
+        return {"event_types": trading().list_event_types(locale=locale)}
     except Exception as e:
         return {"error": f"Failed to list event types: {e}"}
 
@@ -146,7 +146,7 @@ def list_events(event_type_ids: list[str], locale: Optional[str] = None) -> dict
         client = trading()
         events: list[dict] = []
         for event_type_id in event_type_ids:
-            for e in client.list_events(event_type_id):
+            for e in client.list_events(event_type_id, locale=locale):
                 events.append({**e, "open_date": e["open_date"].isoformat() if e["open_date"] else None})
         return {"events": events}
     except Exception as e:
@@ -166,8 +166,12 @@ def list_market_catalogue(
 
     Args:
         event_ids (list[str]): Betfair event ids.
-        market_type_codes (Optional[list[str]]): e.g. ["MATCH_ODDS"].
-        max_results (int): maximum markets returned (default 1000, Betfair max).
+        market_type_codes (Optional[list[str]]): e.g. ["MATCH_ODDS"]. Filtered
+            server-side, so asking for one type does not pay for every type.
+        max_results (int): stop after this many markets (default 1000). Clamped
+            down to CATALOGUE_MAX_RESULTS: a DELAY app key answers above 200
+            with ANGX-0001, and raising that is the operator's decision, not a
+            per-call one.
         locale (Optional[str]): response language.
 
     Returns:
@@ -181,7 +185,9 @@ def list_market_catalogue(
 
         client = trading()
         markets = []
-        for m in client.list_market_catalogue(event_ids):
+        for m in client.list_market_catalogue(
+            event_ids, market_type_codes=market_type_codes, max_results=max_results, locale=locale
+        ):
             norm = normalise_catalogue_market(m, "")
             markets.append(
                 {
@@ -209,7 +215,6 @@ def list_market_catalogue(
 def list_market_book(
     market_ids: list[str],
     include_traded_volume: bool = False,
-    include_best_offers: bool = True,
     ladder_levels: int = 3,
     locale: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -219,8 +224,8 @@ def list_market_book(
     Args:
         market_ids (list[str]): Betfair market ids.
         include_traded_volume (bool): include the traded volume ladder.
-        include_best_offers (bool): include available to back/lay ladders.
-        ladder_levels (int): ladder depth per side, 1-10 (default 3).
+        ladder_levels (int): ladder depth per side, 1-10 (default 3). Clamped
+            to that range.
         locale (Optional[str]): response language.
 
     Returns:
@@ -229,13 +234,20 @@ def list_market_book(
             "status", "last_price_traded", "total_matched",
             "available_to_back": [{"price","size"}],
             "available_to_lay": [{"price","size"}]}]}]}
+
+    ``include_best_offers`` was removed from this signature. It was accepted,
+    documented and ignored — the config always asked Betfair for best offers —
+    and there is no useful answer without them: no offers means no ladder, which
+    is the one thing this tool exists to return.
     """
     try:
         from betfeed.normalize import normalise_book
 
         client = trading()
         books = []
-        for mb in client.list_market_book(market_ids, traded=include_traded_volume):
+        for mb in client.list_market_book(
+            market_ids, traded=include_traded_volume, ladder_levels=ladder_levels, locale=locale
+        ):
             book = normalise_book(mb)
             books.append(
                 {
