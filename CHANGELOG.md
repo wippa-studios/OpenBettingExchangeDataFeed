@@ -11,6 +11,66 @@ This project is **pre-1.0**. There are no releases yet; changes land on `main`.
 
 ### Fixed
 
+- **Every feed document built from a real database was EMPTY.** The contract
+  tested `starts_at` for `str`; psycopg returns a `datetime` for a TIMESTAMPTZ
+  column, so validation raised on the first event and `feed_document` caught it
+  and served `make_feed([], stale=True)`. Both feeds and both MCP feed tools
+  returned nothing. Because the check tested type rather than presence, a present
+  start time and a missing one failed identically.
+- **`JobRun`'s "one transaction per job run" was fiction.** `connect()` defaults
+  to `autocommit=True` and every caller took the default, so each statement in a
+  job committed as it ran and `rollback()` had nothing to undo — while the
+  `feed_run` failure row was still written, making the damage silent. Fixed,
+  along with `ensure_partitions`' mid-run commit, which would have re-broken the
+  invariant.
+- **Results were permanently lost.** `_retire_missing` ran before
+  `_sweep_results` and `unresolved_scope` filters on `is_active`, so one run
+  retired exactly the markets it was there to resolve. Retirement also no longer
+  fires on a market still inside the results backfill window.
+- **`SETTLE_GRACE_MINUTES=30` retired and HID live soccer and tennis matches.**
+  Kickoff is `market_start_time`, so 30 minutes after kickoff a match in progress
+  left `poll_scope` and was then set `is_active=FALSE, is_resolved=FALSE`, which
+  satisfies neither branch of `v_feed1` — gone from both feeds for up to twelve
+  hours. Markets now leave scope on Betfair's *status*, not the clock.
+- **`_capture_scores` inserted a raw dict into JSONB**, so psycopg raised on the
+  first score of every run — outside the guard that promises scores can never
+  take the run down.
+- **The pipeline suite never ran in CI.** No workflow set `TEST_DATABASE_URL`,
+  so 15 end-to-end tests skipped in every job. The first three bugs in this
+  list are all things those tests would have caught.
+- **One malformed ladder row broke `v_feed2` for every reader**, and one fixture
+  could be emitted twice in the same document.
+- **A hand-chosen password was interpolated unescaped into superuser SQL** in
+  `scripts/install_postgres.sh`; the documented rotation path makes it
+  reachable.
+- **`valid_tick` accepted off-tick prices**, which `_rungs` then stored raw:
+  1.015 went into the database as 1.015.
+- Betfair's infinite-size 1.01 lay was published as `size: 0.0` — "nothing
+  available" for the most liquid offer on the book.
+- A market status with stray whitespace (`" CLOSED "`) produced no result at
+  all, silently.
+- A saturated catalogue chunk shipped every one of its markets twice.
+- `list_event_types`/`list_events`/`list_market_catalogue`/`list_market_book`
+  accepted `locale`, `market_type_codes`, `max_results`, `include_best_offers`
+  and `ladder_levels` and ignored them.
+- `implied_prob(0)` raised `ZeroDivisionError` and `implied_prob(-1)` returned a
+  negative probability.
+- `--n` and the MCP feed tools took an unbounded limit; a negative one raised
+  `InvalidRowCountInLimitClause` out of psycopg.
+- A resolved market was silently resurrected to `is_active = TRUE`.
+- Failure counters accumulated for the process lifetime but were reported
+  per-run.
+
+### Changed
+
+- `poll_scope` and `_retire_finished` key on Betfair's market status rather than
+  elapsed time; `SETTLE_GRACE_MINUTES` is now the minimum wait after a terminal
+  status, not a match length. README, `.env.example` and `config.py` updated to
+  match.
+- `pyproject.toml` now declares `mcp`, which `mcp_server.py` actually imports,
+  instead of `fastmcp`, which it does not.
+- The MCP server no longer sets `host="0.0.0.0"` on an unauthenticated server.
+
 - **The committed lockfile pinned the broken version.** `uv.lock` had
   `betfairlightweight 2.20.4` while `pyproject.toml` required `>=2.24.0` — and
   2.20.4 REJECTS the `betDelayModels` field Betfair now returns, so it pinned
