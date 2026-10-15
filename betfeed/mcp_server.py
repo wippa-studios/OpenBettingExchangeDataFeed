@@ -135,7 +135,7 @@ def list_events(event_type_ids: list[str], locale: Optional[str] = None) -> dict
 
     Args:
         event_type_ids (list[str]): Betfair event type ids, e.g. ["1"] Soccer,
-            ["8"] Tennis, ["7"] Horse Racing.
+            ["2"] Tennis, ["7"] Horse Racing. See README for the full list.
         locale (Optional[str]): response language.
 
     Returns:

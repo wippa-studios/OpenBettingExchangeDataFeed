@@ -483,7 +483,7 @@ def test_the_results_sweep_runs_before_retirement(db, monkeypatch):
 def test_a_match_forty_five_minutes_in_is_still_polled_and_still_visible(db):
     """Kickoff is not the end of the event.
 
-    The default sports are EVENT_TYPE_IDS=1,8 — soccer and tennis — and a
+    The default sports are EVENT_TYPE_IDS=1,2 — soccer and tennis — and a
     soccer match runs about two hours after kickoff. A clock-only scope dropped
     the market out of poll_scope 30 minutes after start time, then
     _retire_finished set is_active=FALSE, is_resolved=FALSE, which satisfies

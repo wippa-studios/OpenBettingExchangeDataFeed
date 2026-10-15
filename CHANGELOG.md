@@ -11,6 +11,21 @@ This project is **pre-1.0**. There are no releases yet; changes land on `main`.
 
 ### Fixed
 
+- **The event type table was wrong, so the default feed collected the wrong
+  sport under the right name.** `KNOWN_EVENT_TYPES` claimed `8=Tennis`
+  (Betfair: Motor Sport), `10=Golf` (Special Bets), `4339=Racing (Aus)`
+  (Greyhound Racing), and listed `12`, `13`, `15`, `17`, `20`, `24`, `26`, `30` —
+  ids Betfair has never had. The default `EVENT_TYPE_IDS=1,8` was therefore
+  walking motor sport while writing `event_type_name='Tennis'` and
+  `sport_slug='tennis'` over every one of those rows. Worse, validation rejected
+  any id missing from the map, so **tennis (id 2) could not be collected at
+  all** — `EVENT_TYPE_IDS=1,2` died at boot as `unknown id`, leaving `8` as the
+  only way to reach a sport that was not the one being asked for. The table is
+  now the full 21-sport live `listEventTypes` response, the default is `1,2`,
+  and the wrong table in `.env.example`, `README.md`, the MCP tool docstring and
+  the CI boot assertion are corrected. Three tests pin it, including that the
+  invented ids stay out. Because names become sport slugs, existing motor-sport
+  rows will re-slug to `motor-sport` on the next fixtures run.
 - **Every feed document built from a real database was EMPTY.** The contract
   tested `starts_at` for `str`; psycopg returns a `datetime` for a TIMESTAMPTZ
   column, so validation raised on the first event and `feed_document` caught it

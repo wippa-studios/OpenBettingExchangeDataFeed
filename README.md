@@ -295,7 +295,7 @@ application supply credentials without writing a file at all.
 |---|---|---|
 | `BETFAIR_LOGIN_MODE` | `password` | `password` \| `certs` \| `session_token`. See below. |
 | `BETFAIR_LOCALE` | `en` | Betfair locale. |
-| `EVENT_TYPE_IDS` | `1,8` | Sports to walk. See the table below. |
+| `EVENT_TYPE_IDS` | `1,2` | Sports to walk. See the table below. |
 | `MARKET_TYPE_CODES` | *(empty)* | Restrict market types. Empty means all. |
 | `FIXTURES_INTERVAL_MINUTES` | `720` | Feed 1 cadence. **See the note below — 720 leaves results up to 12 h stale.** |
 | `ODDS_INTERVAL_MINUTES` | `5` | Feed 2 cadence. |
@@ -318,16 +318,31 @@ application supply credentials without writing a file at all.
 
 | id | Sport | | id | Sport |
 |---|---|---|---|---|
-| `1` | Soccer | | `15` | Basketball |
-| `4` | Cricket | | `17` | American Football |
-| `7` | Horse Racing | | `20` | Boxing |
-| `8` | Tennis | | `24` | Darts |
-| `10` | Golf | | `26` | Snooker |
-| `12` | Motor Racing | | `30` | Esports |
-| `13` | Rugby | | `4339` | Racing (Aus) |
+| `1` | Soccer | | `4339` | Greyhound Racing |
+| `2` | Tennis | | `6422` | Snooker |
+| `3` | Golf | | `6423` | American Football |
+| `4` | Cricket | | `7511` | Baseball |
+| `5` | Rugby Union | | `7522` | Basketball |
+| `6` | Boxing | | `7524` | Ice Hockey |
+| `7` | Horse Racing | | `61420` | Australian Rules |
+| `8` | Motor Sport | | `136332` | Chess |
+| `1477` | Rugby League | | `2152880` | Gaelic Games |
+| `3503` | Darts | | `2378961` | Politics |
+| | | | `26420387` | Mixed Martial Arts |
+
+The default `1,2` is Soccer and Tennis. Note that **Tennis is `2`, not `8`** —
+`8` is Motor Sport. Earlier versions of this table had that wrong, along with
+`10=Golf` (actually `3`), `4339=Racing (Aus)` (actually Greyhound Racing), and a
+set of ids Betfair has never listed (`12`, `13`, `15`, `17`, `20`, `24`, `26`,
+`30`). The old default of `1,8` therefore walked Motor Sport while labelling
+every row `Tennis`, and tennis was unreachable: validation rejected id `2` as
+unknown.
 
 Horse racing is deliberately **opt-in**: it is by far the highest market count and
 will dominate every table.
+
+Names above become `fixture.event_type_name` and the sport slug, so a rename on
+Betfair's side changes the slug for that sport.
 
 ### `BETFAIR_LOGIN_MODE`
 
@@ -559,7 +574,7 @@ and a real Postgres, which is why they are pinned here:
 
 **`ConfigError: EVENT_TYPE_IDS must list at least one Betfair event type id`**
 You are running with no defaults. If you are on a recent version this is fixed;
-otherwise set `EVENT_TYPE_IDS=1,8`.
+otherwise set `EVENT_TYPE_IDS=1,2`.
 
 **`CertsError: [Errno 2] No such file or directory: '/certs'`**
 Old version: password mode demanded a certificate directory. Fixed — upgrade.

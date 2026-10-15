@@ -141,6 +141,59 @@ def test_an_unsplittable_saturated_event_is_recorded_not_hidden():
     assert client.truncated_events == ["e1"]
 
 
+# ── event type ids ────────────────────────────────────────────────────────
+
+def test_event_type_ids_match_betfair():
+    """KNOWN_EVENT_TYPES must equal Betfair's live listEventTypes response.
+
+    This table was wrong for a long time and nothing caught it, because no test
+    read it. It claimed 8=Tennis (Motor Sport) and 10=Golf (Special Bets), so
+    the default EVENT_TYPE_IDS=1,8 walked motor sport while labelling it
+    "Tennis", and tennis (2) was rejected at boot as an unknown id — the one
+    sport the default claimed to collect could not be collected at all.
+
+    Pinned here rather than fetched, so the check is offline and free. When
+    Betfair adds a sport this test is the thing that should fail and point at
+    the refresh recipe in config.py.
+    """
+    from betfeed.config import KNOWN_EVENT_TYPES
+
+    # The ids that were wrong, pinned so they cannot drift back.
+    assert KNOWN_EVENT_TYPES["8"] == "Motor Sport"
+    assert KNOWN_EVENT_TYPES["2"] == "Tennis"
+    assert KNOWN_EVENT_TYPES["3"] == "Golf"
+    assert KNOWN_EVENT_TYPES["4339"] == "Greyhound Racing"
+    assert KNOWN_EVENT_TYPES["7"] == "Horse Racing"
+    assert KNOWN_EVENT_TYPES["1"] == "Soccer"
+
+    # Ids this table used to invent. Betfair has never listed them; leaving them
+    # in would let an operator configure a sport that silently returns nothing.
+    for phantom in ("10", "12", "13", "15", "17", "20", "24", "26", "30"):
+        assert phantom not in KNOWN_EVENT_TYPES
+
+
+def test_the_default_sports_are_soccer_and_tennis():
+    """The default must label what it actually walks."""
+    from betfeed.config import Config
+
+    cfg = Config({"DATABASE_URL": "postgresql://x/y", "BETFAIR_APP_KEY": "k"})
+    assert cfg.event_type_ids == ["1", "2"]
+    assert cfg.event_type_names == {"1": "Soccer", "2": "Tennis"}
+
+
+def test_tennis_is_reachable_and_a_bogus_id_is_still_rejected():
+    """EVENT_TYPE_IDS=1,2 used to die at boot as 'unknown id'."""
+    from betfeed.config import Config, ConfigError
+
+    ok = Config({"DATABASE_URL": "postgresql://x/y", "BETFAIR_APP_KEY": "k",
+                 "EVENT_TYPE_IDS": "1,2,7"})
+    assert ok.event_type_names == {"1": "Soccer", "2": "Tennis", "7": "Horse Racing"}
+
+    with pytest.raises(ConfigError, match="unknown id"):
+        Config({"DATABASE_URL": "postgresql://x/y", "BETFAIR_APP_KEY": "k",
+                "EVENT_TYPE_IDS": "1,99999"})
+
+
 # ── login ─────────────────────────────────────────────────────────────────
 
 def test_login_mode_is_validated():

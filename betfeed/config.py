@@ -11,7 +11,58 @@ import os
 import sys
 from pathlib import Path
 
-# Betfair event type ids we will not walk by accident.
+# Betfair event type id -> name, exactly as Betfair names them.
+#
+# This is the full live listEventTypes response (21 sports), read from the
+# Global Exchange on 2026-10-16 with a Delay key. It is NOT a curated subset:
+# the map exists to validate EVENT_TYPE_IDS at boot and to label rows, so it
+# must accept every id Betfair actually offers. Curating it would mean the only
+# way to reach a sport is for someone to add it here first, and an id that is
+# missing fails as "unknown id" rather than as "no such sport".
+#
+# It was previously a subset, and it was WRONG in a way the rest of the repo
+# then documented as fact: it claimed 8=Tennis (actually Motor Sport), 10=Golf
+# (actually Special Bets), 4339=Racing (Aus) (actually Greyhound Racing), and
+# invented 12/13/15/17/20/24/26/30 ids that Betfair has never listed. The
+# default EVENT_TYPE_IDS was "1,8" on the belief that was soccer and tennis, so
+# the out-of-the-box feed walked motor sport while labelling every row "Tennis"
+# — and because validation rejected any id missing from the map, tennis (id 2)
+# was unreachable and EVENT_TYPE_IDS=1,2 died at boot. Betfair's own docs and
+# the live API agree with each other; only this table dissented.
+#
+# TO REFRESH, do not hand-edit — read the real response and paste it:
+#     from betfeed.config import load_config
+#     from betfeed.betfair import BetfairClient
+#     c = BetfairClient(load_config()); c.login()
+#     for r in sorted(c.list_event_types(), key=lambda r: int(r["id"])):
+#         print(f'    "{r["id"]}": "{r["name"]}",')
+#
+# Names here become fixture.event_type_name and the sport_slug, so a rename on
+# Betfair's side silently changes slugs for that sport.
+KNOWN_EVENT_TYPES = {
+    "1": "Soccer",
+    "2": "Tennis",
+    "3": "Golf",
+    "4": "Cricket",
+    "5": "Rugby Union",
+    "6": "Boxing",
+    "7": "Horse Racing",
+    "8": "Motor Sport",
+    "1477": "Rugby League",
+    "3503": "Darts",
+    "4339": "Greyhound Racing",
+    "6422": "Snooker",
+    "6423": "American Football",
+    "7511": "Baseball",
+    "7522": "Basketball",
+    "7524": "Ice Hockey",
+    "61420": "Australian Rules",
+    "136332": "Chess",
+    "2152880": "Gaelic Games",
+    "2378961": "Politics",
+    "26420387": "Mixed Martial Arts",
+}
+
 # MarketProjection values Betfair accepts on listMarketCatalogue. The two
 # Live-key-only ones are listed because they are valid syntax — asking for them
 # on a Delay key fails the request, not the config.
@@ -19,23 +70,6 @@ KNOWN_MARKET_PROJECTIONS = (
     "RUNNER_DESCRIPTION,EVENT,EVENT_TYPE,COMPETITION,MARKET_START_TIME,"
     "MARKET_DESCRIPTION,VENUE"
 )
-
-KNOWN_EVENT_TYPES = {
-    "1": "Soccer",
-    "4": "Cricket",
-    "7": "Horse Racing",
-    "8": "Tennis",
-    "10": "Golf",
-    "12": "Motor Racing",
-    "13": "Rugby",
-    "15": "Basketball",
-    "17": "American Football",
-    "20": "Boxing",
-    "24": "Darts",
-    "26": "Snooker",
-    "30": "Esports",
-    "4339": "Racing (Aus)",
-}
 
 DEFAULTS: dict[str, str] = {
     # DATABASE_URL is deliberately NOT here. _require_url reads self.raw, not
@@ -49,7 +83,7 @@ DEFAULTS: dict[str, str] = {
     "BETFAIR_LOCALE": "en",
     # Which sports feed 1 walks. Horse racing is deliberately opt-in: it is by
     # far the highest market count and will dominate every table.
-    "EVENT_TYPE_IDS": "1,8",
+    "EVENT_TYPE_IDS": "1,2",
     # Empty = every market type for the sports above. Set e.g. "MATCH_ODDS" to
     # halve the odds job's request volume.
     "MARKET_TYPE_CODES": "",

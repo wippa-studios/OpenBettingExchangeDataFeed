@@ -81,7 +81,9 @@ jobs:
           from betfeed.config import load_config, validate_credentials
           c = load_config(env_file='/tmp/definitely-absent.env')
           assert not validate_credentials(c), validate_credentials(c)
-          assert ','.join(sorted(c.event_type_names)) == '1,8', c.event_type_names
+          assert ','.join(sorted(c.event_type_names)) == '1,2', c.event_type_names
+          # Soccer=1 and Tennis=2. Betfair's 8 is Motor Sport, so a '1,8'
+          # default walked motor sport while labelling it tennis.
           # Delay-key safe defaults. Measured, not guessed — see README.
           assert c.catalogue_max_results <= 200, c.catalogue_max_results
           assert c.book_chunk_size <= 40, c.book_chunk_size
